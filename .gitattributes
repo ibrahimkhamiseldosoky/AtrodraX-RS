@@ -1,0 +1,10 @@
+# Normalize line endings; shell scripts must stay LF for Linux/WSL builds.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+
+# Binary assets
+*.img binary
+*.elf binary
+*.bin binary
+*.iso binary
+*.png binary

@@ -1,0 +1,11 @@
+[package]
+name = "atrodrax"
+version = "0.1.0"
+edition = "2021"
+description = "AtrodraX OS — Rust edition"
+
+[[bin]]
+name = "atrodrax"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,12 @@
+# Build artifacts
+/target/
+/build/
+*.iso
+*.log
+*.ppm
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
