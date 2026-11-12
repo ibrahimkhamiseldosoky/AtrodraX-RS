@@ -104,6 +104,9 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
     let mut highest = 0u64;
     let mut linux_compat = entry < 0x1000_0000;
     let mut has_interp = false;
+    // Lowest `p_vaddr - p_offset`: the address the file was linked to. AT_PHDR
+    // is `load_base + phoff`, not `phoff`.
+    let mut load_base: Option<u64> = None;
 
     for index in 0..phnum {
         let ph = phoff + index * phentsize;
@@ -149,6 +152,11 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
         }
 
         let writable = p_flags & 0x2 != 0;
+        let segment_base = vaddr.saturating_sub(p_offset as u64);
+        load_base = Some(match load_base {
+            Some(existing) => existing.min(segment_base),
+            None => segment_base,
+        });
         if !vmm::map_user_range(space, vaddr, end, writable) {
             crate::kprintln!("[elf] out of memory mapping {:#x}..{:#x}", vaddr, end);
             return None;
@@ -174,10 +182,13 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
     }
 
     let brk_start = (highest + 0xFFF) & !0xFFF;
+    let entry = entry.wrapping_add(bias);
+    let phdr = load_base.unwrap_or(bias).wrapping_add(phoff as u64);
     crate::kprintln!(
-        "[elf] loaded entry={:#x} brk={:#x} bias={:#x}{}",
+        "[elf] loaded entry={:#x} brk={:#x} phdr={:#x} bias={:#x}{}",
         entry,
         brk_start,
+        phdr,
         bias,
         if linux_compat { " (linux abi)" } else { "" }
     );
@@ -185,7 +196,7 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
         entry,
         brk_start,
         linux_compat,
-        phdr: phoff as u64 + bias,
+        phdr,
         phent: phentsize as u64,
         phnum: phnum as u64,
         bias,

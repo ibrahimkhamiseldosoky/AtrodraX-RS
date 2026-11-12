@@ -33,8 +33,9 @@ fn pmm_test() {
     let before = crate::mem::pmm::free_pages();
     let page = crate::mem::pmm::alloc_page();
     if let Some(addr) = page {
-        unsafe { core::ptr::write_bytes(addr as *mut u8, 0xA5, 4096) };
-        let ok = unsafe { core::ptr::read_volatile((addr + 1234) as *const u8) } == 0xA5;
+        let virt = crate::mem::vmm::phys_to_virt(addr);
+        unsafe { core::ptr::write_bytes(virt as *mut u8, 0xA5, 4096) };
+        let ok = unsafe { core::ptr::read_volatile((virt + 1234) as *const u8) } == 0xA5;
         crate::mem::pmm::free_page(addr);
         let after = crate::mem::pmm::free_pages();
         check("pmm alloc/free page", ok && after == before);

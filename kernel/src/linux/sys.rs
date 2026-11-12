@@ -19,6 +19,10 @@ use super::abi::*;
 
 const FS_BASE_MSR: u32 = 0xC000_0100;
 
+/// Upper bound for `brk`. The initial user stack lives at 0x0F00_0000 and the
+/// kernel image starts at 0x1000_0000 (see `exec.rs` and `linker.ld`).
+const BRK_LIMIT: u64 = 0x0E00_0000;
+
 static mut LOGGED: [bool; 512] = [false; 512];
 
 fn errno(code: i64) -> u64 {
@@ -68,12 +72,17 @@ pub fn dispatch(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) 
         SYS_GETPID | SYS_GETTID => task_pid(),
         SYS_GETPPID => sched::current().map(|t| t.ppid as u64).unwrap_or(0),
         SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID => 0,
+        // The system has a single group (0), so a supplementary-list query
+        // always reports no entries.
+        SYS_GETGROUPS => 0,
+        SYS_SETGROUPS => 0,
         SYS_EXIT | SYS_EXIT_GROUP => sys_exit(a0 as i32),
         SYS_SET_TID_ADDRESS => task_pid(),
         SYS_RT_SIGACTION => sys_rt_sigaction(a0, a1, a2),
         SYS_RT_SIGPROCMASK => 0,
         SYS_IOCTL => sys_ioctl(a0 as i32, a1, a2),
         SYS_GETTIMEOFDAY => sys_gettimeofday(a0),
+        SYS_TIME => sys_time(a0),
         SYS_CLOCK_GETTIME => sys_clock_gettime(a0, a1),
         SYS_SCHED_YIELD => {
             sched::yield_now();
@@ -82,10 +91,187 @@ pub fn dispatch(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) 
         SYS_GETRANDOM => sys_getrandom(a0, a1 as usize),
         SYS_FUTEX => sys_futex(a0),
         SYS_NANOSLEEP => sys_nanosleep(a0),
+        SYS_FSTAT => sys_fstat(a0 as i32, a1),
+        SYS_NEWFSTATAT => sys_newfstatat(a0 as i64, a1, a2, a3 as i32),
+        SYS_STATFS => sys_statfs(a0, a1),
+        SYS_FSTATFS => sys_fstatfs(a0 as i32, a1),
+        SYS_READLINKAT => errno(EINVAL),
+        SYS_SET_ROBUST_LIST => 0,
+        SYS_PRLIMIT64 => sys_prlimit64(a0, a1, a2, a3),
+        SYS_GETDENTS64 => sys_getdents64(a0 as i32, a1, a2 as usize),
+        // glibc/busybox probe these; they have no effect on a uniprocessor
+        // with no restartable sequences.
+        SYS_PRCTL => 0,
+        SYS_RSEQ => errno(ENOSYS),
         _ => {
             warn_unimplemented(num);
             errno(ENOSYS)
         }
+    }
+}
+
+/* ── stat(2) ───────────────────────────────────────────────────────────── */
+
+/// `struct stat` as x86-64 Linux lays it out (144 bytes).
+fn fill_stat(node: usize, out: &mut [u8; 144]) {
+    let is_dir = node != CONSOLE_NODE && vfs::is_directory(node);
+    let (kind, size) = if node == CONSOLE_NODE {
+        (S_IFCHR | 0o620, 0)
+    } else if is_dir {
+        (S_IFDIR | 0o755, 0)
+    } else {
+        (S_IFREG | 0o644, vfs::size_of(node))
+    };
+
+    put_u64(out, 0, 0x100); // st_dev
+    put_u64(out, 8, node as u64 + 1); // st_ino
+    put_u64(out, 16, if is_dir { 2 } else { 1 }); // st_nlink
+    put_u32(out, 24, kind); // st_mode
+    put_u32(out, 28, 0); // st_uid
+    put_u32(out, 32, 0); // st_gid
+    put_u64(out, 40, 0); // st_rdev
+    put_u64(out, 48, size as u64); // st_size
+    put_u64(out, 56, 4096); // st_blksize
+    put_u64(out, 64, ((size as u64) + 511) / 512); // st_blocks
+    let now = unix_time();
+    for offset in [72, 88, 104] {
+        put_u64(out, offset, now.max(0) as u64); // st_atim/st_mtim/st_ctim
+        put_u64(out, offset + 8, 0);
+    }
+}
+
+fn put_u64(out: &mut [u8], offset: usize, value: u64) {
+    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(out: &mut [u8], offset: usize, value: u32) {
+    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn sys_fstat(fd: i32, out: u64) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let Some(entry) = task::get_fd(index, fd).copied() else {
+        return errno(EBADF);
+    };
+    let mut stat = [0u8; 144];
+    fill_stat(entry.node, &mut stat);
+    if syscall::copy_to_user(&space, out, &stat) {
+        0
+    } else {
+        errno(EFAULT)
+    }
+}
+
+fn sys_newfstatat(dirfd: i64, path_ptr: u64, out: u64, flags: i32) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let path = syscall::read_cstr(&space, path_ptr, 256).unwrap_or_default();
+    let node = if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return errno(ENOENT);
+        }
+        match task::get_fd(index, dirfd as i32).copied() {
+            Some(entry) => entry.node,
+            None => return errno(EBADF),
+        }
+    } else {
+        let cwd = task::get(index).cwd.clone();
+        match vfs::resolve(&path, &cwd) {
+            Some(node) => node,
+            None => return errno(ENOENT),
+        }
+    };
+    let mut stat = [0u8; 144];
+    fill_stat(node, &mut stat);
+    if syscall::copy_to_user(&space, out, &stat) {
+        0
+    } else {
+        errno(EFAULT)
+    }
+}
+
+/// `struct statfs` as x86-64 Linux lays it out (120 bytes). The RAMFS lives in
+/// kernel memory backed by physical frames, so the numbers are derived from the
+/// page allocator instead of a disk.
+fn fill_statfs(out: &mut [u8; 120]) {
+    let free = crate::mem::pmm::free_pages() as u64;
+    let total = crate::boot::total_memory_bytes() / 4096;
+    put_u64(out, 0, 0x8584_58F6); // f_type: RAMFS_MAGIC
+    put_u64(out, 8, 4096); // f_bsize
+    put_u64(out, 16, total); // f_blocks
+    put_u64(out, 24, free); // f_bfree
+    put_u64(out, 32, free); // f_bavail
+    put_u64(out, 40, total / 2); // f_files
+    put_u64(out, 48, total / 4); // f_ffree
+    put_u64(out, 64, 255); // f_namelen
+    put_u64(out, 72, 4096); // f_frsize
+}
+
+fn sys_statfs(path_ptr: u64, out: u64) -> u64 {
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    if syscall::read_cstr(&space, path_ptr, 4096).is_none() {
+        return errno(EFAULT);
+    }
+    let mut buf = [0u8; 120];
+    fill_statfs(&mut buf);
+    if syscall::copy_to_user(&space, out, &buf) {
+        0
+    } else {
+        errno(EFAULT)
+    }
+}
+
+fn sys_fstatfs(fd: i32, out: u64) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    if task::get_fd(index, fd).is_none() {
+        return errno(EBADF);
+    }
+    let mut buf = [0u8; 120];
+    fill_statfs(&mut buf);
+    if syscall::copy_to_user(&space, out, &buf) {
+        0
+    } else {
+        errno(EFAULT)
+    }
+}
+
+fn sys_prlimit64(_pid: u64, resource: u64, _new_limit: u64, old_limit: u64) -> u64 {
+    if old_limit == 0 {
+        return 0;
+    }
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    // Only the limits libc actually inspects answer meaningfully; everything
+    // else reports "unlimited".
+    let (cur, max) = match resource {
+        3 => (8 * 1024 * 1024u64, 8 * 1024 * 1024u64), // RLIMIT_STACK
+        7 => (1024, 1024),                             // RLIMIT_NOFILE
+        _ => (u64::MAX, u64::MAX),
+    };
+    let mut buf = [0u8; 16];
+    put_u64(&mut buf, 0, cur);
+    put_u64(&mut buf, 8, max);
+    if syscall::copy_to_user(&space, old_limit, &buf) {
+        0
+    } else {
+        errno(EFAULT)
     }
 }
 
@@ -165,6 +351,9 @@ fn sys_read(fd: i32, buffer: u64, len: usize) -> u64 {
     let Some(entry) = task::get_fd(index, fd).copied() else {
         return errno(EBADF);
     };
+    if vfs::is_directory(entry.node) {
+        return errno(EISDIR);
+    }
     let data = vfs::read(entry.node, entry.offset, len);
     if !syscall::copy_to_user(&space, buffer, &data) {
         return errno(EFAULT);
@@ -267,8 +456,9 @@ fn sys_brk(requested: u64) -> u64 {
     if requested == 0 || requested < start {
         return current;
     }
-    // Keep the heap below the anonymous-mmap window.
-    if requested > 0x4000_0000 {
+    // The kernel keeps a low identity mapping of its own image and of the
+    // initial user stack, so the heap must stay below both of them.
+    if requested > BRK_LIMIT {
         return current;
     }
     if requested > current {
@@ -480,6 +670,19 @@ fn sys_gettimeofday(out: u64) -> u64 {
     }
 }
 
+fn sys_time(out: u64) -> u64 {
+    let seconds = unix_time();
+    if out != 0 {
+        let Some(space) = syscall::current_space() else {
+            return errno(EFAULT);
+        };
+        if !syscall::copy_to_user(&space, out, &seconds.to_le_bytes()) {
+            return errno(EFAULT);
+        }
+    }
+    seconds as u64
+}
+
 fn sys_clock_gettime(clock: u64, out: u64) -> u64 {
     let Some(space) = syscall::current_space() else {
         return errno(EFAULT);
@@ -544,4 +747,57 @@ fn sys_nanosleep(request: u64) -> u64 {
         sched::sleep_ms(ms);
     }
     0
+}
+
+/* ── Directories ───────────────────────────────────────────────────────── */
+
+/// `getdents64`: emit `struct linux_dirent64` records until the buffer is full.
+fn sys_getdents64(fd: i32, buffer: u64, len: usize) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let Some(entry) = task::get_fd(index, fd).copied() else {
+        return errno(EBADF);
+    };
+    if entry.node == CONSOLE_NODE || !vfs::is_directory(entry.node) {
+        return errno(ENOTDIR);
+    }
+
+    let listing = vfs::list(entry.node);
+    let mut out: Vec<u8> = Vec::new();
+    let mut next = entry.offset;
+    while next < listing.len() {
+        let (name, kind, child) = &listing[next];
+        let record_len = (19 + name.len() + 1 + 7) & !7;
+        if out.len() + record_len > len {
+            break;
+        }
+        out.resize(out.len() + record_len, 0);
+        let at = out.len() - record_len;
+        out[at..at + 8].copy_from_slice(&(*child as u64 + 1).to_le_bytes());
+        out[at + 8..at + 16].copy_from_slice(&((next + 1) as u64).to_le_bytes());
+        out[at + 16..at + 18].copy_from_slice(&(record_len as u16).to_le_bytes());
+        out[at + 18] = match *kind {
+            vfs::KIND_DIR | vfs::KIND_FAT_DIR => 4,  // DT_DIR
+            vfs::KIND_CHAR => 2,                     // DT_CHR
+            _ => 8,                                  // DT_REG
+        };
+        out[at + 19..at + 19 + name.len()].copy_from_slice(name.as_bytes());
+        next += 1;
+    }
+
+    if let Some(entry) = task::get_fd(index, fd) {
+        entry.offset = next;
+    }
+    if out.is_empty() {
+        return 0;
+    }
+    if syscall::copy_to_user(&space, buffer, &out) {
+        out.len() as u64
+    } else {
+        errno(EFAULT)
+    }
 }

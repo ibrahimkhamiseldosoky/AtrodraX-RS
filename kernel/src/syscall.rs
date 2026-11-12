@@ -242,7 +242,8 @@ pub(crate) fn copy_from_user(space: &AddrSpace, address: u64, len: usize) -> Opt
         let page_offset = (va & 0xFFF) as usize;
         let chunk = (4096 - page_offset).min(len - offset);
         unsafe {
-            let slice = core::slice::from_raw_parts(physical as *const u8, chunk);
+            let slice =
+                core::slice::from_raw_parts(vmm::phys_to_virt(physical) as *const u8, chunk);
             out.extend_from_slice(slice);
         }
         offset += chunk;
@@ -258,7 +259,7 @@ pub(crate) fn read_cstr(space: &AddrSpace, address: u64, max: usize) -> Option<S
     let mut out = Vec::new();
     for index in 0..max {
         let physical = vmm::translate(space, address + index as u64)?;
-        let byte = unsafe { *(physical as *const u8) };
+        let byte = unsafe { *(vmm::phys_to_virt(physical) as *const u8) };
         if byte == 0 {
             break;
         }

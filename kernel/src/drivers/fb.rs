@@ -1,6 +1,7 @@
 //! Linear framebuffer driver with a software backbuffer.
 
 use crate::boot;
+use crate::mem::vmm::phys_to_virt;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr;
@@ -213,21 +214,21 @@ pub fn present() {
             if fb.pitch == fb.width * 4 {
                 ptr::copy_nonoverlapping(
                     buffer.as_ptr() as *const u8,
-                    fb.address as *mut u8,
+                    phys_to_virt(fb.address) as *mut u8,
                     fb.width * fb.height * 4,
                 );
             } else {
                 for y in 0..fb.height {
                     ptr::copy_nonoverlapping(
                         buffer.as_ptr().add(y * fb.width) as *const u8,
-                        (fb.address as *mut u8).add(y * fb.pitch),
+                        (phys_to_virt(fb.address) as *mut u8).add(y * fb.pitch),
                         fb.width * 4,
                     );
                 }
             }
         } else if fb.bpp == 24 {
             for y in 0..fb.height {
-                let dst = (fb.address as *mut u8).add(y * fb.pitch);
+                let dst = (phys_to_virt(fb.address) as *mut u8).add(y * fb.pitch);
                 for x in 0..fb.width {
                     let c = buffer[y * fb.width + x];
                     *dst.add(x * 3 + 0) = (c & 0xFF) as u8;

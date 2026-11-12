@@ -2,6 +2,7 @@
 
 use crate::drivers::pci;
 use crate::mem::pmm;
+use crate::mem::vmm::phys_to_virt;
 use core::ptr::{read_volatile, write_volatile};
 
 const REG_CTRL: u32 = 0x0000;
@@ -84,12 +85,12 @@ static mut NIC: Option<Nic> = None;
 
 #[inline]
 unsafe fn read32(nic: &Nic, offset: u32) -> u32 {
-    read_volatile((nic.mmio + offset as u64) as *const u32)
+    read_volatile(phys_to_virt(nic.mmio + offset as u64) as *const u32)
 }
 
 #[inline]
 unsafe fn write32(nic: &Nic, offset: u32, value: u32) {
-    write_volatile((nic.mmio + offset as u64) as *mut u32, value)
+    write_volatile(phys_to_virt(nic.mmio + offset as u64) as *mut u32, value)
 }
 
 pub fn present() -> bool {
@@ -213,7 +214,7 @@ pub fn init() {
 
         // RX ring.
         for index in 0..RX_COUNT {
-            let desc = (rx_desc as *mut RxDesc).add(index);
+            let desc = (phys_to_virt(rx_desc) as *mut RxDesc).add(index);
             (*desc).addr = rx_bufs + (index * BUF_SIZE) as u64;
             (*desc).length = 0;
             (*desc).status = 0;
@@ -233,7 +234,7 @@ pub fn init() {
 
         // TX ring.
         for index in 0..TX_COUNT {
-            let desc = (tx_desc as *mut TxDesc).add(index);
+            let desc = (phys_to_virt(tx_desc) as *mut TxDesc).add(index);
             (*desc).addr = tx_bufs + (index * BUF_SIZE) as u64;
             (*desc).length = 0;
             (*desc).cso = 0;
@@ -279,14 +280,15 @@ pub fn tx(frame: &[u8]) -> bool {
     }
     unsafe {
         let slot = nic.tx_cur;
-        let desc = (nic.tx_desc as *mut TxDesc).add(slot);
-        let buffer = (nic.tx_bufs + (slot * BUF_SIZE) as u64) as *mut u8;
+        let desc = (phys_to_virt(nic.tx_desc) as *mut TxDesc).add(slot);
+        let buffer_paddr = nic.tx_bufs + (slot * BUF_SIZE) as u64;
+        let buffer = phys_to_virt(buffer_paddr) as *mut u8;
         core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer, frame.len());
         let length = frame.len().max(60);
         if length > frame.len() {
             core::ptr::write_bytes(buffer.add(frame.len()), 0, length - frame.len());
         }
-        (*desc).addr = buffer as u64;
+        (*desc).addr = buffer_paddr;
         (*desc).length = length as u16;
         (*desc).cmd = 0x0B; // EOP | IFCS | RS
         (*desc).status = 0;
@@ -314,14 +316,15 @@ pub fn rx_poll() {
     unsafe {
         for _ in 0..RX_COUNT {
             let slot = nic.rx_cur;
-            let desc = (nic.rx_desc as *mut RxDesc).add(slot);
+            let desc = (phys_to_virt(nic.rx_desc) as *mut RxDesc).add(slot);
             if (*desc).status & 0x01 == 0 {
                 break;
             }
             let length = (*desc).length as usize;
             let errors = (*desc).errors;
             if errors == 0 && length > 14 && length <= BUF_SIZE {
-                let frame = core::slice::from_raw_parts((*desc).addr as *const u8, length);
+                let frame =
+                    core::slice::from_raw_parts(phys_to_virt((*desc).addr) as *const u8, length);
                 let mut copy = alloc::vec![0u8; length];
                 copy.copy_from_slice(frame);
                 crate::net::receive(&copy);

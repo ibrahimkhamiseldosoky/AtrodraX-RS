@@ -92,6 +92,7 @@ pub extern "C" fn kernel_main(magic: u32, mb2_phys: u64) -> ! {
     arch::tss::init();
     arch::idt::init();
     arch::pic::init();
+    unsafe { arch::cpu::init_fpu() };
 
     mem::pmm::init();
     mem::heap::init();

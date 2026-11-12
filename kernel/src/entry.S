@@ -65,6 +65,13 @@ _start:
     movl %eax, boot_pml4
     movl $0, boot_pml4 + 4
 
+    /* PML4[511] aliases the same PDPT at 0xFFFFFF80_00000000: the kernel's
+     * direct map. Kernel code keeps using low identity addresses for its own
+     * image, but page tables and DMA buffers are reached through this window,
+     * which user mappings can never occupy. */
+    movl %eax, boot_pml4 + 4088
+    movl $0, boot_pml4 + 4092
+
     /* PDPT[0..3] -> four page directories (4 GiB total) */
     movl $boot_pd0, %eax
     orl  $0x3, %eax

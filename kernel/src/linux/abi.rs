@@ -63,7 +63,14 @@ pub const SYS_GETGID: u64 = 104;
 pub const SYS_GETEUID: u64 = 107;
 pub const SYS_GETEGID: u64 = 108;
 pub const SYS_GETPPID: u64 = 110;
+pub const SYS_GETGROUPS: u64 = 115;
+pub const SYS_SETGROUPS: u64 = 116;
+pub const SYS_STATFS: u64 = 137;
+pub const SYS_FSTATFS: u64 = 138;
 pub const SYS_ARCH_PRCTL: u64 = 158;
+pub const SYS_PRCTL: u64 = 157;
+pub const SYS_TIME: u64 = 201;
+pub const SYS_RSEQ: u64 = 334;
 pub const SYS_GETTID: u64 = 186;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_GETDENTS64: u64 = 217;
@@ -73,8 +80,11 @@ pub const SYS_CLOCK_GETRES: u64 = 229;
 pub const SYS_EXIT_GROUP: u64 = 231;
 pub const SYS_OPENAT: u64 = 257;
 pub const SYS_NEWFSTATAT: u64 = 262;
+pub const SYS_READLINKAT: u64 = 267;
 pub const SYS_UNLINKAT: u64 = 263;
 pub const SYS_MKDIRAT: u64 = 258;
+pub const SYS_SET_ROBUST_LIST: u64 = 273;
+pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_GETCPU: u64 = 309;
 
@@ -118,6 +128,14 @@ pub const O_NONBLOCK: i32 = 0o4000;
 pub const O_DIRECTORY: i32 = 0o200000;
 
 pub const AT_FDCWD: i64 = -100;
+pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+pub const AT_EMPTY_PATH: i32 = 0x1000;
+
+/* ── stat(2) ───────────────────────────────────────────────────────────── */
+
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFDIR: u32 = 0o040000;
+pub const S_IFREG: u32 = 0o100000;
 
 /* ── lseek(2) ──────────────────────────────────────────────────────────── */
 

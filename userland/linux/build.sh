@@ -18,3 +18,7 @@ CFLAGS=(
 
 "$CC" "${CFLAGS[@]}" -o "$OUT/hello_linux.elf" hello.c
 echo "[userland] hello_linux.elf -> $OUT"
+
+# libc-linked probe (needs libc.a for the target, e.g. libc6-dev on Ubuntu).
+"$CC" -static -no-pie -O2 -o "$OUT/libc_hello.elf" libc_hello.c
+echo "[userland] libc_hello.elf -> $OUT"

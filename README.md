@@ -12,18 +12,25 @@ There is no C in the kernel, no `libc`, and no external crate. The only non-Rust
 build input is the assembler source (`kernel/src/entry.S`), embedded with
 `global_asm!`; everything else uses `alloc` on top of a bare-metal Rust runtime.
 
-> **Linux ABI status: early bring-up working.**
-> The kernel now installs a real `syscall`/`sysret` entry path (LSTAR/STAR/SFMASK
+> **Linux ABI status: static glibc binaries and busybox run.**
+> The kernel installs a real `syscall`/`sysret` entry path (LSTAR/STAR/SFMASK
 > + `EFER.SCE`) and a growing static-binary syscall table: `read`, `write`,
 > `open`/`openat`, `close`, `lseek`, `brk`, anonymous `mmap`/`munmap`, `mprotect`,
-> `arch_prctl`, `uname`, the pid/uid/gid queries, `exit`/`exit_group`,
+> `arch_prctl`, `uname`, the pid/uid/gid/group queries, `exit`/`exit_group`,
 > `set_tid_address`, `rt_sigaction`/`rt_sigprocmask`, `ioctl` (winsize/FIONREAD),
-> `gettimeofday`, `clock_gettime`, `getrandom`, `futex` and `nanosleep`.
+> `gettimeofday`, `time`, `clock_gettime`, `getrandom`, `futex`, `nanosleep`,
+> `stat`/`fstat`/`newfstatat`, `getdents64`, `statfs`/`fstatfs`, `prlimit64`,
+> `prctl` and `set_robust_list`.
 > Statically linked x86-64 ELF binaries run in ring 3 with a SysV
-> `argc`/`argv`/`envp`/`auxv` stack; `hello_linux` prints and exits cleanly.
+> `argc`/`argv`/`envp`/`auxv` stack. A real glibc build (`libc_hello`) exercises
+> `malloc`/`brk`, `stat`, file reads, `opendir`/`readdir` and process identity;
+> busybox 1.37 runs `echo`, `cat`, `id`, `uname`, `ls`, `ls -l` and `df`.
+> The kernel runs everything through a PML4 direct map, so page tables and DMA
+> buffers are never reached through user-visible addresses, and it enables SSE
+> for libc's `memcpy`/`memset`.
 > Dynamically linked binaries (`PT_INTERP`) are rejected with an explicit error.
-> Still missing: `fstat`, `getdents64`, `execve`, `clone`/`fork`/`wait4`, pipes,
-> signal delivery and `/dev/fb0` (needed by DOOM) - see [Roadmap](#roadmap).
+> Still missing: `execve`, `clone`/`fork`/`wait4`, pipes, signal delivery and
+> `/dev/fb0` (needed by DOOM) - see [Roadmap](#roadmap).
 
 ![AtrodraX-RS desktop, Dark theme](docs/screenshot-dark.png)
 
@@ -199,7 +206,7 @@ Not yet implemented:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| **Linux ABI** (`syscall`/`sysret`, Linux syscall table) | 🟡 **partial** | Entry point + ~30 syscalls work; static `hello_linux` runs. Missing `fstat`, `getdents64`, `execve`, `clone`/`wait4`, pipes, signals |
+| **Linux ABI** (`syscall`/`sysret`, Linux syscall table) | 🟡 **partial** | Entry point + ~45 syscalls work; static glibc programs and busybox applets (`echo`, `cat`, `id`, `uname`, `ls`, `df`) run. Missing `execve`, `clone`/`wait4`, pipes, signals |
 | Kernel/user address-space separation | ✅ partial | Kernel + heap live at 256-320 MiB; user segments overlapping the image are rejected at load time |
 | DOOM + `doom1.wad` | ⏳ blocked on Linux ABI | The game is a static Linux binary that opens `/dev/fb0` and `mmap`s the framebuffer |
 | `/dev/fb0` + generic `mmap` | ⏳ planned | Prerequisite for DOOM and any direct-framebuffer app |

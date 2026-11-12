@@ -7,6 +7,7 @@
 use crate::arch::port::{inb, inl, inw, outb, outl, outw};
 use crate::drivers::pci;
 use crate::mem::pmm;
+use crate::mem::vmm::phys_to_virt;
 use core::sync::atomic::{fence, Ordering};
 
 const VIRTIO_VENDOR: u16 = 0x1AF4;
@@ -108,7 +109,7 @@ pub fn init() {
             crate::kprintln!("[virtio] queue size {} needs a larger arena", queue_size);
             return;
         }
-        core::ptr::write_bytes(queue as *mut u8, 0, 5 * 4096);
+        core::ptr::write_bytes(phys_to_virt(queue) as *mut u8, 0, 5 * 4096);
 
         // Legacy queue address register takes the page frame number.
         outl(io + 0x08, (queue >> 12) as u32);
@@ -141,40 +142,40 @@ pub fn init() {
 }
 
 unsafe fn desc_base(queue: u64) -> *mut Desc {
-    queue as *mut Desc
+    phys_to_virt(queue) as *mut Desc
 }
 
 unsafe fn avail_ring(queue: u64, size: u16) -> *mut u16 {
     // flags(2) + idx(2) + ring[size], after the descriptor table.
-    (queue as *mut u8).add(16 * size as usize + 4) as *mut u16
+    (phys_to_virt(queue) as *mut u8).add(16 * size as usize + 4) as *mut u16
 }
 
 unsafe fn avail_idx_ptr(queue: u64, size: u16) -> *mut u16 {
-    (queue as *mut u8).add(16 * size as usize + 2) as *mut u16
+    (phys_to_virt(queue) as *mut u8).add(16 * size as usize + 2) as *mut u16
 }
 
 unsafe fn used_base(queue: u64, size: u16) -> *mut u8 {
     let offset = (16 * size as u64 + 4 + 2 * size as u64 + 0xFFF) & !0xFFF;
-    (queue as *mut u8).add(offset as usize)
+    (phys_to_virt(queue) as *mut u8).add(offset as usize)
 }
 
 fn submit(dev: &mut Device, write: bool, lba: u64, data: &mut [u8]) -> bool {
     unsafe {
         let q = dev.queue;
         let req = dev.request;
-        let hdr = req as *mut u8;
+        let hdr = phys_to_virt(req) as *mut u8;
         core::ptr::write_bytes(hdr, 0, 16);
         let kind: u32 = if write { REQ_WRITE } else { REQ_READ };
         core::ptr::write_unaligned(hdr as *mut u32, kind);
         core::ptr::write_unaligned(hdr.add(8) as *mut u64, lba);
 
-        let data_ptr = (req + 512) as *mut u8;
+        let data_ptr = phys_to_virt(req + 512) as *mut u8;
         if write {
             core::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, 512);
         } else {
             core::ptr::write_bytes(data_ptr, 0, 512);
         }
-        let status_ptr = (req + 1024) as *mut u8;
+        let status_ptr = phys_to_virt(req + 1024) as *mut u8;
         *status_ptr = 0xFF;
 
         let desc = desc_base(q);

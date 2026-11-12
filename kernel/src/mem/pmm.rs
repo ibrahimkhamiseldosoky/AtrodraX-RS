@@ -177,7 +177,11 @@ pub fn free_n(base: u64, count: usize) {
 
 pub fn zero_range(addr: u64, len: u64) {
     unsafe {
-        core::ptr::write_bytes(addr as *mut u8, 0, len as usize);
+        // `addr` is physical; reach it through the kernel's direct map rather
+        // than dereferencing the physical address (which a user mapping could
+        // shadow).
+        let virt = crate::mem::vmm::phys_to_virt(addr);
+        core::ptr::write_bytes(virt as *mut u8, 0, len as usize);
     }
 }
 

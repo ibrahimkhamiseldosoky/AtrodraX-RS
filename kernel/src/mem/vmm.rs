@@ -19,6 +19,18 @@ pub const PTE_HUGE: u64 = 1 << 7;
 pub const PTE_NX: u64 = 1 << 63;
 const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
+/// Where the kernel's direct map of physical memory lives. PML4 slot 511
+/// aliases the boot page tables, so `DIRECT_MAP_BASE + paddr` always refers to
+/// physical memory regardless of what the user half of the address space maps.
+/// The kernel therefore never treats a physical address as a pointer.
+pub const DIRECT_MAP_BASE: u64 = 0xFFFF_FF80_0000_0000;
+
+#[inline]
+pub fn phys_to_virt(paddr: u64) -> u64 {
+    DIRECT_MAP_BASE + paddr
+}
+
+
 #[derive(Clone, Copy)]
 pub struct AddrSpace {
     pub pml4_phys: u64,
@@ -51,7 +63,7 @@ pub fn load(cr3: u64) {
 }
 
 unsafe fn table_at(phys: u64) -> *mut u64 {
-    phys as *mut u64
+    phys_to_virt(phys) as *mut u64
 }
 
 pub fn create() -> Option<AddrSpace> {
@@ -65,8 +77,8 @@ pub fn create() -> Option<AddrSpace> {
 
         // Pages come from the physical allocator uninitialized; clear the top
         // two levels so stale content cannot act as page-table entries.
-        core::ptr::write_bytes(table_at(pml4), 0, 512);
-        core::ptr::write_bytes(table_at(pdpt), 0, 512);
+        core::ptr::write_bytes(table_at(pml4) as *mut u8, 0u8, 512 * 8);
+        core::ptr::write_bytes(table_at(pdpt) as *mut u8, 0u8, 512 * 8);
 
         // Clone the four 1 GiB page directories.
         let boot_pds = [
@@ -84,6 +96,11 @@ pub fn create() -> Option<AddrSpace> {
             *table_at(pdpt).add(i) = pds[i] | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
         }
         *table_at(pml4) = pdpt | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+        // Share the kernel's direct map (PML4 slot 511). The boot tables it
+        // points at are never modified, so every address space gets the same
+        // supervisor-only view of physical memory.
+        let boot_pdpt_phys = core::ptr::addr_of!(boot_pdpt) as u64;
+        *table_at(pml4).add(511) = boot_pdpt_phys | PTE_PRESENT | PTE_WRITABLE;
 
         Some(AddrSpace { pml4_phys: pml4 })
     }
@@ -317,8 +334,8 @@ pub fn copy_space(source: &AddrSpace) -> Option<AddrSpace> {
                             | ((pt_index as u64) << 12);
                         let new_page = pmm::alloc_page()?;
                         core::ptr::copy_nonoverlapping(
-                            (entry & PHYS_MASK) as *const u8,
-                            new_page as *mut u8,
+                            phys_to_virt(entry & PHYS_MASK) as *const u8,
+                            phys_to_virt(new_page) as *mut u8,
                             PAGE_SIZE,
                         );
                         map_user_page(&dest, vaddr, new_page, entry & PTE_WRITABLE != 0);
@@ -330,7 +347,7 @@ pub fn copy_space(source: &AddrSpace) -> Option<AddrSpace> {
     Some(dest)
 }
 
-/// Copy bytes into a user address space through the kernel identity map.
+/// Copy bytes into a user address space through the kernel's direct map.
 pub fn write_user(space: &AddrSpace, vaddr: u64, data: &[u8]) -> bool {
     let mut offset = 0usize;
     while offset < data.len() {
@@ -342,7 +359,11 @@ pub fn write_user(space: &AddrSpace, vaddr: u64, data: &[u8]) -> bool {
         let page_off = (va & 0xFFF) as usize;
         let chunk = (PAGE_SIZE - page_off).min(data.len() - offset);
         unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr().add(offset), pa as *mut u8, chunk);
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr().add(offset),
+                phys_to_virt(pa) as *mut u8,
+                chunk,
+            );
         }
         offset += chunk;
     }

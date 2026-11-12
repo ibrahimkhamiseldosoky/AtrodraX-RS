@@ -34,7 +34,7 @@ pub fn populate() {
     let tmp = mkdir(root, "tmp");
     mkdir(root, "disk");
     let dev = mkdir(root, "dev");
-    mkdir(root, "proc");
+    let proc = mkdir(root, "proc");
     mkdir(home, "user");
 
     write_file(
@@ -73,6 +73,13 @@ pub fn populate() {
     );
     write_file(dev, "null", "");
 
+    // Linux programs that enumerate mounts (`df`, `mount`, `findmnt`) read the
+    // traditional table. Everything lives in one RAMFS, so a single root entry
+    // describes the whole system.
+    let mounts = "ramfs / ramfs rw,relatime 0 0\nproc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n";
+    write_file(proc, "mounts", mounts);
+    write_file(etc, "mtab", mounts);
+
     user_programs!(
         bin;
         "shell",
@@ -86,6 +93,8 @@ pub fn populate() {
         "fs_tool",
         "hello",
         "hello_linux",
+        "libc_hello",
+        "busybox",
         "htmld",
         "imgview",
         "make",

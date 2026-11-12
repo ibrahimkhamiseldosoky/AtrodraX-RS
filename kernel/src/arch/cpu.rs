@@ -85,6 +85,26 @@ pub unsafe fn invlpg(vaddr: u64) {
     asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
 }
 
+/// Enable the SSE/SSE2 unit for user mode.
+///
+/// x86-64 guarantees SSE2 exists, and C libraries (and their `memcpy`/`memset`)
+/// use it unconditionally. Without CR4.OSFXSR/OSXMMEXCPT, every SSE instruction
+/// raises #UD, which shows up as a user task dying on an "invalid opcode".
+pub unsafe fn init_fpu() {
+    let mut cr0: u64;
+    let mut cr4: u64;
+    asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+    cr0 &= !(1 << 2); // EM: no x87 emulation
+    cr0 |= 1 << 1; // MP: monitor coprocessor
+    cr0 &= !(1 << 3); // TS: no lazy FPU switching yet
+    asm!("mov cr0, {}", in(reg) cr0, options(nostack));
+
+    asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+    cr4 |= (1 << 9) | (1 << 10); // OSFXSR | OSXMMEXCPT
+    asm!("mov cr4, {}", in(reg) cr4, options(nostack));
+    asm!("fninit", options(nostack, nomem));
+}
+
 #[inline]
 pub fn rdmsr(msr: u32) -> u64 {
     let lo: u32;
