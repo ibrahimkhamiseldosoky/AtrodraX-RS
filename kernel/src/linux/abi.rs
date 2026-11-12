@@ -85,6 +85,8 @@ pub const SYS_UNLINKAT: u64 = 263;
 pub const SYS_MKDIRAT: u64 = 258;
 pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_PRLIMIT64: u64 = 302;
+pub const SYS_DUP3: u64 = 292;
+pub const SYS_PIPE2: u64 = 293;
 pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_GETCPU: u64 = 309;
 
@@ -97,6 +99,7 @@ pub const EINTR: i64 = 4;
 pub const EIO: i64 = 5;
 pub const ENOEXEC: i64 = 8;
 pub const EBADF: i64 = 9;
+pub const ECHILD: i64 = 10;
 pub const EAGAIN: i64 = 11;
 pub const ENOMEM: i64 = 12;
 pub const EACCES: i64 = 13;
@@ -106,11 +109,13 @@ pub const ENODEV: i64 = 19;
 pub const ENOTDIR: i64 = 20;
 pub const EISDIR: i64 = 21;
 pub const EINVAL: i64 = 22;
+pub const ENFILE: i64 = 23;
 pub const EMFILE: i64 = 24;
 pub const ENOSPC: i64 = 28;
 pub const ESPIPE: i64 = 29;
 pub const EROFS: i64 = 30;
 pub const EMLINK: i64 = 31;
+pub const EPIPE: i64 = 32;
 pub const ERANGE: i64 = 34;
 pub const ENOSYS: i64 = 38;
 pub const ENOTTY: i64 = 25;
@@ -161,6 +166,22 @@ pub const MAP_STACK: i32 = 0x20000;
 
 pub const ARCH_SET_FS: u64 = 0x1002;
 pub const ARCH_GET_FS: u64 = 0x1003;
+
+/* ── clone(2) flags ────────────────────────────────────────────────────── */
+
+pub const CLONE_VM: u64 = 0x0000_0100;
+pub const CLONE_FS: u64 = 0x0000_0200;
+pub const CLONE_FILES: u64 = 0x0000_0400;
+pub const CLONE_SIGHAND: u64 = 0x0000_0800;
+pub const CLONE_VFORK: u64 = 0x0000_4000;
+pub const CLONE_THREAD: u64 = 0x0001_0000;
+pub const CLONE_SETTLS: u64 = 0x0008_0000;
+pub const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+pub const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+pub const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+
+/// `wait4(2)` option: return immediately when no child has exited.
+pub const WNOHANG: u64 = 1;
 
 /* ── Signals (only the parts the layer tracks) ─────────────────────────── */
 

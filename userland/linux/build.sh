@@ -22,6 +22,12 @@ echo "[userland] hello_linux.elf -> $OUT"
 "$CC" "${CFLAGS[@]}" -o "$OUT/exec_hello.elf" exec_hello.c
 echo "[userland] exec_hello.elf -> $OUT"
 
+"$CC" "${CFLAGS[@]}" -o "$OUT/fork_test.elf" fork_test.c
+echo "[userland] fork_test.elf -> $OUT"
+
+"$CC" "${CFLAGS[@]}" -o "$OUT/pipe_test.elf" pipe_test.c
+echo "[userland] pipe_test.elf -> $OUT"
+
 # libc-linked probe (needs libc.a for the target, e.g. libc6-dev on Ubuntu).
 "$CC" -static -no-pie -O2 -o "$OUT/libc_hello.elf" libc_hello.c
 echo "[userland] libc_hello.elf -> $OUT"

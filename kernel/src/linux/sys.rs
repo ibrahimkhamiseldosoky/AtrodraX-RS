@@ -6,6 +6,7 @@
 //! once each.
 
 use crate::apps;
+use crate::arch::idt::TrapFrame;
 use crate::drivers::rtc;
 use crate::fs::vfs;
 use crate::mem::vmm;
@@ -17,6 +18,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::abi::*;
+use super::UserContext;
 
 const FS_BASE_MSR: u32 = 0xC000_0100;
 
@@ -57,13 +59,29 @@ fn fd_is_console(index: usize, fd: i32) -> bool {
 
 /* ── Dispatch ──────────────────────────────────────────────────────────── */
 
-pub fn dispatch(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+pub fn dispatch(context: &UserContext) -> u64 {
+    let UserContext {
+        num,
+        a0,
+        a1,
+        a2,
+        a3,
+        a4,
+        a5,
+        ..
+    } = *context;
     match num {
         SYS_READ => sys_read(a0 as i32, a1, a2 as usize),
         SYS_WRITE => sys_write(a0 as i32, a1, a2 as usize),
         SYS_OPEN => sys_openat(AT_FDCWD, a0, a1 as i32),
         SYS_OPENAT => sys_openat(a0 as i64, a1, a2 as i32),
         SYS_CLOSE => sys_close(a0 as i32),
+        SYS_DUP => sys_dup(a0 as i32),
+        SYS_DUP2 => sys_dup2(a0 as i32, a1 as i32),
+        SYS_DUP3 => sys_dup3(a0 as i32, a1 as i32),
+        SYS_FCNTL => sys_fcntl(a0 as i32, a1 as i32, a2),
+        SYS_PIPE => sys_pipe(a0),
+        SYS_PIPE2 => sys_pipe2(a0, a1 as i32),
         SYS_LSEEK => sys_lseek(a0 as i32, a1 as i64, a2 as i32),
         SYS_BRK => sys_brk(a0),
         SYS_MMAP => sys_mmap(a0, a1 as usize, a2 as i32, a3 as i32, a4 as i32, a5 as i64),
@@ -79,6 +97,9 @@ pub fn dispatch(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) 
         SYS_SETGROUPS => 0,
         SYS_EXIT | SYS_EXIT_GROUP => sys_exit(a0 as i32),
         SYS_EXECVE => sys_execve(a0, a1, a2),
+        SYS_CLONE => sys_clone(context),
+        SYS_FORK | SYS_VFORK => sys_fork(context),
+        SYS_WAIT4 => sys_wait4(a0 as i64, a1, a2, a3),
         SYS_SET_TID_ADDRESS => task_pid(),
         SYS_RT_SIGACTION => sys_rt_sigaction(a0, a1, a2),
         SYS_RT_SIGPROCMASK => 0,
@@ -101,6 +122,7 @@ pub fn dispatch(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) 
         SYS_SET_ROBUST_LIST => 0,
         SYS_PRLIMIT64 => sys_prlimit64(a0, a1, a2, a3),
         SYS_GETDENTS64 => sys_getdents64(a0 as i32, a1, a2 as usize),
+        SYS_GETCWD => sys_getcwd(a0, a1 as usize),
         // glibc/busybox probe these; they have no effect on a uniprocessor
         // with no restartable sequences.
         SYS_PRCTL => 0,
@@ -253,6 +275,28 @@ fn sys_fstatfs(fd: i32, out: u64) -> u64 {
     }
 }
 
+fn sys_getcwd(out: u64, size: usize) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let cwd = task::get(index).cwd.clone();
+    let bytes = cwd.as_bytes();
+    if size < bytes.len() + 1 {
+        return errno(ERANGE);
+    }
+    let mut data = Vec::with_capacity(bytes.len() + 1);
+    data.extend_from_slice(bytes);
+    data.push(0);
+    if syscall::copy_to_user(&space, out, &data) {
+        out
+    } else {
+        errno(EFAULT)
+    }
+}
+
 fn sys_prlimit64(_pid: u64, resource: u64, _new_limit: u64, old_limit: u64) -> u64 {
     if old_limit == 0 {
         return 0;
@@ -322,6 +366,131 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     }
 }
 
+/* ── Process creation ──────────────────────────────────────────────────── */
+
+fn sys_fork(context: &UserContext) -> u64 {
+    // fork() is clone(SIGCHLD, 0): the child resumes on the same stack.
+    fork_like(context, SIGCHLD, 0, 0)
+}
+
+fn sys_clone(context: &UserContext) -> u64 {
+    // clone(flags, stack, parent_tid, child_tid, tls)
+    fork_like(context, context.a0, context.a1, context.a4)
+}
+
+/// Fork-like `clone`: the child receives a private copy of the address space
+/// and resumes at the caller's RIP with `rax = 0`, the parent gets the PID.
+fn fork_like(context: &UserContext, flags: u64, child_stack: u64, tls: u64) -> u64 {
+    // Threads (a shared address space) are not supported yet; neither is
+    // vfork's "parent sleeps until exec" contract beyond plain fork.
+    if flags & (CLONE_VM | CLONE_THREAD | CLONE_SIGHAND | CLONE_FILES) != 0 {
+        return errno(ENOSYS);
+    }
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(parent_space) = task::get(index).space else {
+        return errno(ESRCH);
+    };
+    let Some(child_space) = vmm::copy_space(&parent_space) else {
+        return errno(ENOMEM);
+    };
+
+    let frame = TrapFrame {
+        rip: context.rip,
+        rsp: if child_stack != 0 { child_stack } else { context.rsp },
+        rflags: context.rflags,
+        cs: (crate::arch::gdt::USER_CS | 3) as u64,
+        ss: (crate::arch::gdt::USER_DS | 3) as u64,
+        rax: 0,
+        rbx: context.rbx,
+        rbp: context.rbp,
+        r12: context.r12,
+        r13: context.r13,
+        r14: context.r14,
+        r15: context.r15,
+        rdi: context.a0,
+        rsi: context.a1,
+        rdx: context.a2,
+        r10: context.a3,
+        r8: context.a4,
+        r9: context.a5,
+        rcx: context.rip,
+        r11: context.rflags,
+        ..TrapFrame::default()
+    };
+
+    let pid = task::fork_from(index, frame, child_space);
+    if pid <= 0 {
+        return errno(ENOMEM);
+    }
+    if let Some(child_index) = task::find(pid) {
+        if flags & CLONE_SETTLS != 0 {
+            task::get(child_index).fs_base = tls;
+        }
+    }
+    if flags & CLONE_CHILD_SETTID != 0 && context.a3 != 0 {
+        if let Some(child_space) = task::find(pid).and_then(|i| task::get(i).space) {
+            syscall::copy_to_user(&child_space, context.a3, &(pid as i32).to_le_bytes());
+        }
+    }
+    if flags & CLONE_PARENT_SETTID != 0 && context.a2 != 0 {
+        if let Some(space) = syscall::current_space() {
+            syscall::copy_to_user(&space, context.a2, &(pid as i32).to_le_bytes());
+        }
+    }
+    pid as u64
+}
+
+fn sys_wait4(pid: i64, status_ptr: u64, options: u64, _rusage: u64) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let caller = task::get(index).pid;
+    loop {
+        let mut found: Option<(i32, i32)> = None;
+        let mut has_children = false;
+        for child in task::table().iter() {
+            if child.ppid != caller || child.pid == caller {
+                continue;
+            }
+            has_children = true;
+            if (pid == -1 || pid == 0 || child.pid as i64 == pid)
+                && child.state == task::TASK_ZOMBIE
+            {
+                found = Some((child.pid, child.exit_code));
+                break;
+            }
+        }
+        if let Some((child_pid, code)) = found {
+            if let Some(child_index) = task::find(child_pid) {
+                task::get(child_index).state = task::TASK_DEAD;
+            }
+            if status_ptr != 0 {
+                let Some(space) = syscall::current_space() else {
+                    return errno(EFAULT);
+                };
+                // Normal exit: status = code << 8 (WIFEXITED / WEXITSTATUS).
+                let status = ((code & 0xFF) << 8) as i32;
+                if !syscall::copy_to_user(&space, status_ptr, &status.to_le_bytes()) {
+                    return errno(EFAULT);
+                }
+            }
+            return child_pid as u64;
+        }
+        if !has_children {
+            return errno(ECHILD);
+        }
+        if options & WNOHANG != 0 {
+            return 0;
+        }
+        sched::block_and_switch(|task| {
+            task.state = task::TASK_BLOCKED;
+            task.waiting_for = pid as i32;
+        });
+    }
+}
+
 /* ── I/O ───────────────────────────────────────────────────────────────── */
 
 fn sys_write(fd: i32, buffer: u64, len: usize) -> u64 {
@@ -356,6 +525,25 @@ fn sys_write(fd: i32, buffer: u64, len: usize) -> u64 {
     let Some(entry) = task::get_fd(index, fd).copied() else {
         return errno(EBADF);
     };
+    if let Some((_, readers, _, is_write)) = syscall::pipe_info(entry.node) {
+        if !is_write {
+            return errno(EBADF);
+        }
+        if readers <= 0 {
+            return errno(EPIPE);
+        }
+        let mut written = 0usize;
+        while written < data.len() {
+            let accepted = syscall::pipe_put(entry.node, &data[written..]);
+            if accepted == 0 {
+                // The pipe is full: let the reader drain it.
+                sched::sleep_ms(2);
+                continue;
+            }
+            written += accepted;
+        }
+        return written as u64;
+    }
     let written = vfs::write(entry.node, entry.offset, &data);
     if let Some(entry) = task::get_fd(index, fd) {
         entry.offset += written;
@@ -398,6 +586,32 @@ fn sys_read(fd: i32, buffer: u64, len: usize) -> u64 {
     let Some(entry) = task::get_fd(index, fd).copied() else {
         return errno(EBADF);
     };
+    if let Some((_, _, _, is_write)) = syscall::pipe_info(entry.node) {
+        if is_write {
+            return errno(EBADF);
+        }
+        let mut temp = vec![0u8; len.min(4096)];
+        loop {
+            let (buffered, _, writers, _) =
+                syscall::pipe_info(entry.node).unwrap_or((0, 0, 0, false));
+            if buffered > 0 {
+                let taken = syscall::pipe_take(entry.node, &mut temp);
+                if taken == 0 {
+                    continue;
+                }
+                return if syscall::copy_to_user(&space, buffer, &temp[..taken]) {
+                    taken as u64
+                } else {
+                    errno(EFAULT)
+                };
+            }
+            if writers <= 0 {
+                return 0; // EOF: every write end is closed.
+            }
+            // Writers are alive but nothing is queued yet: block.
+            sched::sleep_ms(5);
+        }
+    }
     if vfs::is_directory(entry.node) {
         return errno(EISDIR);
     }
@@ -459,6 +673,129 @@ fn sys_close(fd: i32) -> u64 {
     } else {
         errno(EBADF)
     }
+}
+
+const F_DUPFD: i32 = 0;
+const F_GETFD: i32 = 1;
+const F_SETFD: i32 = 2;
+const F_GETFL: i32 = 3;
+const F_SETFL: i32 = 4;
+
+/// Copy the file-description of `fd` into the lowest free slot.
+fn sys_dup(fd: i32) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(entry) = task::get_fd(index, fd).copied() else {
+        return errno(EBADF);
+    };
+    let new_fd = task::alloc_fd(index, entry.node, entry.flags);
+    if new_fd < 0 {
+        return errno(EMFILE);
+    }
+    if let Some(slot) = task::get_fd(index, new_fd) {
+        slot.offset = entry.offset;
+    }
+    syscall::retain_pipe(entry.node);
+    new_fd as u64
+}
+
+/// Copy `oldfd` to exactly `newfd`, closing whatever lived there first.
+fn sys_dup2(oldfd: i32, newfd: i32) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    if newfd < 0 || newfd as usize >= task::MAX_FDS {
+        return errno(EBADF);
+    }
+    let Some(entry) = task::get_fd(index, oldfd).copied() else {
+        return errno(EBADF);
+    };
+    if oldfd == newfd {
+        return newfd as u64;
+    }
+    if task::get_fd(index, newfd).is_some() {
+        syscall::close_fd(index, newfd);
+    }
+    task::get(index).fds[newfd as usize] = Some(entry);
+    syscall::retain_pipe(entry.node);
+    newfd as u64
+}
+
+/// `dup3(2)`: like `dup2` but rejects equal descriptors. The flags argument
+/// only carries `O_CLOEXEC`, which this system does not track.
+fn sys_dup3(oldfd: i32, newfd: i32) -> u64 {
+    if oldfd == newfd {
+        return errno(EINVAL);
+    }
+    sys_dup2(oldfd, newfd)
+}
+
+fn sys_fcntl(fd: i32, command: i32, argument: u64) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(entry) = task::get_fd(index, fd).copied() else {
+        return errno(EBADF);
+    };
+    match command {
+        // Duplicate at or above `argument`.
+        F_DUPFD => {
+            let lowest = argument as usize;
+            if lowest >= task::MAX_FDS {
+                return errno(EINVAL);
+            }
+            let task = task::get(index);
+            let mut slot = None;
+            for candidate in lowest..task::MAX_FDS {
+                if task.fds[candidate].is_none() {
+                    slot = Some(candidate);
+                    break;
+                }
+            }
+            let Some(slot) = slot else {
+                return errno(EMFILE);
+            };
+            task::get(index).fds[slot] = Some(entry);
+            syscall::retain_pipe(entry.node);
+            slot as u64
+        }
+        F_GETFD => 0,
+        F_SETFD => 0,
+        F_GETFL => entry.flags as u64,
+        F_SETFL => {
+            if let Some(slot) = task::get_fd(index, fd) {
+                slot.flags = argument as i32;
+            }
+            0
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+fn sys_pipe(out: u64) -> u64 {
+    sys_pipe2(out, 0)
+}
+
+fn sys_pipe2(out: u64, _flags: i32) -> u64 {
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let Some((read_fd, write_fd)) = syscall::create_pipe(index) else {
+        return errno(ENFILE);
+    };
+    let mut data = [0u8; 8];
+    data[0..4].copy_from_slice(&read_fd.to_le_bytes());
+    data[4..8].copy_from_slice(&write_fd.to_le_bytes());
+    if !syscall::copy_to_user(&space, out, &data) {
+        syscall::close_fd(index, read_fd);
+        syscall::close_fd(index, write_fd);
+        return errno(EFAULT);
+    }
+    0
 }
 
 fn sys_lseek(fd: i32, offset: i64, whence: i32) -> u64 {

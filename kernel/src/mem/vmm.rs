@@ -88,9 +88,12 @@ pub fn create() -> Option<AddrSpace> {
             core::ptr::addr_of!(boot_pd3) as u64,
         ];
         for i in 0..4 {
+            // Write through the direct map: a user page may shadow the
+            // physical address in the address space that is currently active
+            // (for example a large BSS), so `pds[i]` is not a usable pointer.
             core::ptr::copy_nonoverlapping(
-                boot_pds[i] as *const u64,
-                pds[i] as *mut u64,
+                table_at(boot_pds[i]) as *const u64,
+                table_at(pds[i]),
                 512,
             );
             *table_at(pdpt).add(i) = pds[i] | PTE_PRESENT | PTE_WRITABLE | PTE_USER;

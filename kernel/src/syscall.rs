@@ -150,6 +150,93 @@ fn pipe_release(node: usize) {
     }
 }
 
+/// Bump the reference count of every pipe end in an fd table (used when a
+/// process duplicates its descriptors for `fork`/`clone`).
+pub(crate) fn retain_pipe_refs(fds: &[Option<Fd>]) {
+    for entry in fds.iter().flatten() {
+        retain_pipe(entry.node);
+    }
+}
+
+/// Bump one pipe end's reference count (`dup`).
+pub(crate) fn retain_pipe(node: usize) {
+    let Some((id, write)) = pipe_parts(node) else {
+        return;
+    };
+    let list = pipes();
+    if let Some(Some(pipe)) = list.get_mut(id) {
+        if write {
+            pipe.write_refs += 1;
+        } else {
+            pipe.read_refs += 1;
+        }
+    }
+}
+
+/// Create a pipe and return its `(read, write)` descriptors.
+pub(crate) fn create_pipe(index: usize) -> Option<(i32, i32)> {
+    let list = pipes();
+    let id = list.len();
+    list.push(Some(Pipe {
+        buffer: Vec::new(),
+        read_refs: 1,
+        write_refs: 1,
+    }));
+    ensure_std_fds(index);
+    let read_fd = task::alloc_fd(index, pipe_node(id, false), 0);
+    let write_fd = task::alloc_fd(index, pipe_node(id, true), 0);
+    if read_fd < 0 || write_fd < 0 {
+        if read_fd >= 0 {
+            task::close_fd(index, read_fd);
+        }
+        if write_fd >= 0 {
+            task::close_fd(index, write_fd);
+        }
+        return None;
+    }
+    Some((read_fd, write_fd))
+}
+
+/// `Some((buffered, readers, writers, is_write_end))` when `node` is a pipe.
+pub(crate) fn pipe_info(node: usize) -> Option<(usize, i32, i32, bool)> {
+    let (id, write) = pipe_parts(node)?;
+    let list = pipes();
+    let Some(Some(pipe)) = list.get_mut(id) else {
+        return None;
+    };
+    Some((pipe.buffer.len(), pipe.read_refs, pipe.write_refs, write))
+}
+
+/// Move up to `out.len()` buffered bytes out of a pipe.
+pub(crate) fn pipe_take(node: usize, out: &mut [u8]) -> usize {
+    let Some((id, _)) = pipe_parts(node) else {
+        return 0;
+    };
+    let list = pipes();
+    let Some(Some(pipe)) = list.get_mut(id) else {
+        return 0;
+    };
+    let take = out.len().min(pipe.buffer.len());
+    out[..take].copy_from_slice(&pipe.buffer[..take]);
+    pipe.buffer.drain(..take);
+    take
+}
+
+/// Append as much of `data` as the pipe can hold; returns the bytes accepted.
+pub(crate) fn pipe_put(node: usize, data: &[u8]) -> usize {
+    let Some((id, _)) = pipe_parts(node) else {
+        return 0;
+    };
+    let list = pipes();
+    let Some(Some(pipe)) = list.get_mut(id) else {
+        return 0;
+    };
+    let space = PIPE_CAP.saturating_sub(pipe.buffer.len());
+    let take = data.len().min(space);
+    pipe.buffer.extend_from_slice(&data[..take]);
+    take
+}
+
 /* ── GUI event queue ───────────────────────────────────────────────────── */
 
 #[repr(C)]
@@ -520,19 +607,6 @@ fn sys_exec(index: usize, path: &str, argv: &[String]) -> i64 {
 }
 
 fn sys_fork(f: &TrapFrame, index: usize) -> i64 {
-    let parent_pid = task::get(index).pid;
-    let parent_name = task::get(index).name.clone();
-    let parent_cwd = task::get(index).cwd.clone();
-    let (brk, brk_start, linux_compat, fs_base, mmap_base) = {
-        let parent = task::get(index);
-        (
-            parent.brk,
-            parent.brk_start,
-            parent.linux_compat,
-            parent.fs_base,
-            parent.mmap_base,
-        )
-    };
     let Some(parent_space) = task::get(index).space else {
         return -1;
     };
@@ -541,33 +615,7 @@ fn sys_fork(f: &TrapFrame, index: usize) -> i64 {
     };
     let mut frame = *f;
     frame.rax = 0;
-    let child = task::create_user(&parent_name, frame, child_space, &parent_name);
-    if let Some(child_index) = task::find(child) {
-        let fds = task::get(index).fds.clone();
-        let child_task = task::get(child_index);
-        child_task.ppid = parent_pid;
-        child_task.cwd = parent_cwd;
-        child_task.brk = brk;
-        child_task.brk_start = brk_start;
-        child_task.mmap_base = mmap_base;
-        child_task.linux_compat = linux_compat;
-        child_task.fs_base = fs_base;
-        child_task.fds = fds;
-        for entry in child_task.fds.iter().flatten() {
-            if pipe_parts(entry.node).is_some() {
-                let Some((id, write)) = pipe_parts(entry.node) else { continue };
-                let list = pipes();
-                if let Some(Some(pipe)) = list.get_mut(id) {
-                    if write {
-                        pipe.write_refs += 1;
-                    } else {
-                        pipe.read_refs += 1;
-                    }
-                }
-            }
-        }
-    }
-    child as i64
+    task::fork_from(index, frame, child_space) as i64
 }
 
 fn sys_wait(index: usize, pid: i32, status_out: u64) -> i64 {

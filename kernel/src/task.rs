@@ -151,10 +151,43 @@ pub fn create_user(name: &str, frame: TrapFrame, space: AddrSpace, argv0: &str) 
     pid
 }
 
+/// Duplicate an existing task into `space` with `frame` as the child's initial
+/// user context. Shared by the native `fork` and the Linux `fork`/`clone`.
+pub fn fork_from(index: usize, frame: TrapFrame, space: AddrSpace) -> Pid {
+    let (parent_pid, name, cwd, brk, brk_start, mmap_base, linux_compat, fs_base, fds) = {
+        let parent = get(index);
+        (
+            parent.pid,
+            parent.name.clone(),
+            parent.cwd.clone(),
+            parent.brk,
+            parent.brk_start,
+            parent.mmap_base,
+            parent.linux_compat,
+            parent.fs_base,
+            parent.fds.clone(),
+        )
+    };
+    let child = create_user(&name, frame, space, &name);
+    if let Some(child_index) = find(child) {
+        let child_task = get(child_index);
+        child_task.ppid = parent_pid;
+        child_task.cwd = cwd;
+        child_task.brk = brk;
+        child_task.brk_start = brk_start;
+        child_task.mmap_base = mmap_base;
+        child_task.linux_compat = linux_compat;
+        child_task.fs_base = fs_base;
+        child_task.fds = fds;
+        // Duplicating an fd table keeps the underlying pipes alive.
+        crate::syscall::retain_pipe_refs(&child_task.fds);
+    }
+    child
+}
+
 pub fn find(pid: Pid) -> Option<usize> {
     table().iter().position(|t| t.pid == pid)
 }
-
 pub fn find_index(pid: Pid) -> Option<usize> {
     find(pid)
 }

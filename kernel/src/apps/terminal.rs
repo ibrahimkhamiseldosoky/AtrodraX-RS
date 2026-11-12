@@ -385,9 +385,9 @@ impl Terminal {
         if trimmed.is_empty() {
             return;
         }
-        let mut parts = trimmed.split_whitespace();
-        let cmd = parts.next().unwrap_or("");
-        let args: Vec<&str> = parts.collect();
+        let tokens = split_args(trimmed);
+        let cmd = tokens.first().map(|s| s.as_str()).unwrap_or("");
+        let args: Vec<&str> = tokens.iter().skip(1).map(|s| s.as_str()).collect();
         match cmd {
             "help" => {
                 self.write_str(
@@ -771,8 +771,48 @@ fn sched_pid() -> i32 {
     crate::sched::current_pid()
 }
 
-fn parse_ipv4(text: &str) -> Option<u32> {
-    let mut octets = [0u8; 4];
+/// Split a command line into arguments, honouring single and double quotes so
+/// that `busybox sh -c 'echo hi | cat'` arrives as one script argument.
+fn split_args(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for ch in line.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    started = true;
+                }
+                c if c.is_whitespace() => {
+                    if started || !current.is_empty() {
+                        out.push(current.clone());
+                        current.clear();
+                        started = false;
+                    }
+                }
+                c => {
+                    current.push(c);
+                    started = true;
+                }
+            },
+        }
+    }
+    if started || !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+fn parse_ipv4(text: &str) -> Option<u32> {    let mut octets = [0u8; 4];
     let mut count = 0;
     for part in text.split('.') {
         if count >= 4 {

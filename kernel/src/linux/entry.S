@@ -46,21 +46,42 @@ linux_syscall_entry:
     pushq %r8
     pushq %r9
 
-    /* Marshal SysV arguments: (num, a0, a1, a2, a3, a4) + a5 on the stack. */
-    movq %rax, %rdi
-    movq 40(%rsp), %rsi
-    movq 32(%rsp), %rdx
-    movq 24(%rsp), %rcx
-    movq 16(%rsp), %r8
-    movq 8(%rsp), %r9
-    pushq (%rsp)              /* a5 = saved user r9; also 16-byte aligns */
-
+    /* struct UserContext (16 u64 = 128 bytes) plus 8 bytes of padding to keep
+     * the stack 16-byte aligned for the call. Layout mirrors `UserContext` in
+     * linux/mod.rs; the saved frame above starts at offset 136. */
+    subq $136, %rsp
+    movq %rax, 0(%rsp)        /* syscall number */
+    movq 176(%rsp), %rax
+    movq %rax, 8(%rsp)        /* a0 = rdi */
+    movq 168(%rsp), %rax
+    movq %rax, 16(%rsp)       /* a1 = rsi */
+    movq 160(%rsp), %rax
+    movq %rax, 24(%rsp)       /* a2 = rdx */
+    movq 152(%rsp), %rax
+    movq %rax, 32(%rsp)       /* a3 = r10 */
+    movq 144(%rsp), %rax
+    movq %rax, 40(%rsp)       /* a4 = r8 */
+    movq 136(%rsp), %rax
+    movq %rax, 48(%rsp)       /* a5 = r9 */
+    movq 192(%rsp), %rax
+    movq %rax, 56(%rsp)       /* user RIP (rcx) */
+    movq 200(%rsp), %rax
+    movq %rax, 64(%rsp)       /* user RSP */
+    movq 184(%rsp), %rax
+    movq %rax, 72(%rsp)       /* user RFLAGS (r11) */
+    movq %rbx, 80(%rsp)
+    movq %rbp, 88(%rsp)
+    movq %r12, 96(%rsp)
+    movq %r13, 104(%rsp)
+    movq %r14, 112(%rsp)
+    movq %r15, 120(%rsp)
+    movq %rsp, %rdi
     call linux_syscall_dispatch
 
-    addq $8, %rsp             /* drop a5 */
+    addq $136, %rsp           /* drop the context; rsp = saved frame */
 
     /* execve() replaced the image: resume in the new program instead of
-     * returning to the old one. Frame slots (after the drop):
+     * returning to the old one. Frame slots:
      *   0 r9, 8 r8, 16 r10, 24 rdx, 32 rsi, 40 rdi, 48 r11, 56 rcx, 64 rsp
      */
     cmpq $0, linux_exec_pending(%rip)

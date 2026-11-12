@@ -90,16 +90,36 @@ pub fn request_exec_frame(rsp: u64, rip: u64, rflags: u64) {
     }
 }
 
-/// Called from `entry.S` with the Linux argument registers already marshalled.
+/// Register state captured by the SYSCALL stub for the current call.
+///
+/// `fork`/`clone` need the caller's RIP/RSP/RFLAGS and callee-saved registers
+/// so the child resumes in the same place as the parent; `execve` needs the
+/// same RSP/RIP/RFLAGS to return into a new image. The layout is mirrored by
+/// `entry.S`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserContext {
+    pub num: u64,
+    pub a0: u64,
+    pub a1: u64,
+    pub a2: u64,
+    pub a3: u64,
+    pub a4: u64,
+    pub a5: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+}
+
+/// Called from `entry.S` with a pointer to the saved [`UserContext`].
 #[no_mangle]
-pub extern "C" fn linux_syscall_dispatch(
-    num: u64,
-    a0: u64,
-    a1: u64,
-    a2: u64,
-    a3: u64,
-    a4: u64,
-    a5: u64,
-) -> u64 {
-    sys::dispatch(num, a0, a1, a2, a3, a4, a5)
+pub extern "C" fn linux_syscall_dispatch(context: *const UserContext) -> u64 {
+    let context = unsafe { &*context };
+    sys::dispatch(context)
 }
