@@ -51,6 +51,9 @@ pub fn current_pid() -> i32 {
 
 pub fn activate(task: &Task) {
     tss::set_rsp0(task.kstack_top);
+    // SYSCALL does not switch stacks through the TSS, so the Linux entry stub
+    // needs the same kernel stack address in its own slot.
+    crate::linux::set_kernel_stack(task.kstack_top);
     if let Some(space) = task.space {
         vmm::load_space(&space);
     } else {
@@ -58,18 +61,17 @@ pub fn activate(task: &Task) {
     }
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        // FS.base is used by Linux-compatible TLS (musl).
-        if task.fs_base != 0 {
-            let lo = task.fs_base as u32;
-            let hi = (task.fs_base >> 32) as u32;
-            core::arch::asm!(
-                "wrmsr",
-                in("ecx") 0xC000_0100u32,
-                in("eax") lo,
-                in("edx") hi,
-                options(nostack)
-            );
-        }
+        // FS.base is used by Linux-compatible TLS (musl). Always write it,
+        // including zero, or a task resumes with the previous task's TLS.
+        let lo = task.fs_base as u32;
+        let hi = (task.fs_base >> 32) as u32;
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC000_0100u32,
+            in("eax") lo,
+            in("edx") hi,
+            options(nostack)
+        );
     }
 }
 

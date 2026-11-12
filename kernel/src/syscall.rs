@@ -215,7 +215,7 @@ pub fn gui_forget_window(pid: i32, win: u32) {
 
 /* ── user memory helpers ───────────────────────────────────────────────── */
 
-fn current_index() -> Option<usize> {
+pub(crate) fn current_index() -> Option<usize> {
     if sched::current().is_some() {
         Some(sched::current_index())
     } else {
@@ -223,11 +223,11 @@ fn current_index() -> Option<usize> {
     }
 }
 
-fn current_space() -> Option<AddrSpace> {
+pub(crate) fn current_space() -> Option<AddrSpace> {
     sched::current().and_then(|t| t.space)
 }
 
-fn copy_from_user(space: &AddrSpace, address: u64, len: usize) -> Option<Vec<u8>> {
+pub(crate) fn copy_from_user(space: &AddrSpace, address: u64, len: usize) -> Option<Vec<u8>> {
     if len == 0 {
         return Some(Vec::new());
     }
@@ -250,11 +250,11 @@ fn copy_from_user(space: &AddrSpace, address: u64, len: usize) -> Option<Vec<u8>
     Some(out)
 }
 
-fn copy_to_user(space: &AddrSpace, address: u64, data: &[u8]) -> bool {
+pub(crate) fn copy_to_user(space: &AddrSpace, address: u64, data: &[u8]) -> bool {
     vmm::write_user(space, address, data)
 }
 
-fn read_cstr(space: &AddrSpace, address: u64, max: usize) -> Option<String> {
+pub(crate) fn read_cstr(space: &AddrSpace, address: u64, max: usize) -> Option<String> {
     let mut out = Vec::new();
     for index in 0..max {
         let physical = vmm::translate(space, address + index as u64)?;
@@ -375,7 +375,7 @@ fn fd_write(index: usize, fd: i32, data: &[u8]) -> i32 {
     n as i32
 }
 
-fn close_fd(index: usize, fd: i32) -> i32 {
+pub(crate) fn close_fd(index: usize, fd: i32) -> i32 {
     let Some(entry) = fd_entry(index, fd) else {
         return -1;
     };
@@ -522,9 +522,15 @@ fn sys_fork(f: &TrapFrame, index: usize) -> i64 {
     let parent_pid = task::get(index).pid;
     let parent_name = task::get(index).name.clone();
     let parent_cwd = task::get(index).cwd.clone();
-    let (brk, brk_start, linux_compat, fs_base) = {
+    let (brk, brk_start, linux_compat, fs_base, mmap_base) = {
         let parent = task::get(index);
-        (parent.brk, parent.brk_start, parent.linux_compat, parent.fs_base)
+        (
+            parent.brk,
+            parent.brk_start,
+            parent.linux_compat,
+            parent.fs_base,
+            parent.mmap_base,
+        )
     };
     let Some(parent_space) = task::get(index).space else {
         return -1;
@@ -542,6 +548,7 @@ fn sys_fork(f: &TrapFrame, index: usize) -> i64 {
         child_task.cwd = parent_cwd;
         child_task.brk = brk;
         child_task.brk_start = brk_start;
+        child_task.mmap_base = mmap_base;
         child_task.linux_compat = linux_compat;
         child_task.fs_base = fs_base;
         child_task.fds = fds;

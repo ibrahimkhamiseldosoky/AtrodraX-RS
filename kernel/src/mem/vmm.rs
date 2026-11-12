@@ -63,6 +63,11 @@ pub fn create() -> Option<AddrSpace> {
             *slot = pmm::alloc_page()?;
         }
 
+        // Pages come from the physical allocator uninitialized; clear the top
+        // two levels so stale content cannot act as page-table entries.
+        core::ptr::write_bytes(table_at(pml4), 0, 512);
+        core::ptr::write_bytes(table_at(pdpt), 0, 512);
+
         // Clone the four 1 GiB page directories.
         let boot_pds = [
             core::ptr::addr_of!(boot_pd0) as u64,
@@ -121,7 +126,9 @@ pub fn map_user_page(space: &AddrSpace, vaddr: u64, paddr: u64, writable: bool) 
 
         let mut entry = *pd.add(pd_index);
         if entry & PTE_HUGE != 0 {
-            // Split the 2 MiB mapping into a 512-entry page table.
+            // Split the 2 MiB mapping into a 512-entry page table. The new
+            // table must keep the original identity mapping: entry `i` covers
+            // `base + i * 4 KiB`, not `i * 2 MiB`.
             let pt_phys = match pmm::alloc_page() {
                 Some(p) => p,
                 None => return false,
@@ -129,7 +136,7 @@ pub fn map_user_page(space: &AddrSpace, vaddr: u64, paddr: u64, writable: bool) 
             let pt = table_at(pt_phys);
             let base = entry & 0x000F_FFFF_FFE0_0000;
             for i in 0..512 {
-                *pt.add(i) = (base + (i as u64 * 0x20_0000)) | PTE_PRESENT | PTE_WRITABLE;
+                *pt.add(i) = (base + (i as u64 * PAGE_SIZE as u64)) | PTE_PRESENT | PTE_WRITABLE;
             }
             entry = pt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
             *pd.add(pd_index) = entry;

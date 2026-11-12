@@ -12,13 +12,18 @@ There is no C in the kernel, no `libc`, and no external crate. The only non-Rust
 build input is the assembler source (`kernel/src/entry.S`), embedded with
 `global_asm!`; everything else uses `alloc` on top of a bare-metal Rust runtime.
 
-> **Linux ABI status: not implemented yet.**
-> The loader detects Linux-ABI ELF binaries (`PT_INTERP`, low load address) and
-> records the flag on the task, but the kernel does **not** yet provide the
-> `syscall`/`sysret` entry point or the Linux syscall table. Native AtrodraX
-> programs run today; static Linux binaries (`busybox`, `hello_linux`) and DOOM
-> do not. Implementing it is the next planned milestone — see
-> [Roadmap](#roadmap).
+> **Linux ABI status: early bring-up working.**
+> The kernel now installs a real `syscall`/`sysret` entry path (LSTAR/STAR/SFMASK
+> + `EFER.SCE`) and a growing static-binary syscall table: `read`, `write`,
+> `open`/`openat`, `close`, `lseek`, `brk`, anonymous `mmap`/`munmap`, `mprotect`,
+> `arch_prctl`, `uname`, the pid/uid/gid queries, `exit`/`exit_group`,
+> `set_tid_address`, `rt_sigaction`/`rt_sigprocmask`, `ioctl` (winsize/FIONREAD),
+> `gettimeofday`, `clock_gettime`, `getrandom`, `futex` and `nanosleep`.
+> Statically linked x86-64 ELF binaries run in ring 3 with a SysV
+> `argc`/`argv`/`envp`/`auxv` stack; `hello_linux` prints and exits cleanly.
+> Dynamically linked binaries (`PT_INTERP`) are rejected with an explicit error.
+> Still missing: `fstat`, `getdents64`, `execve`, `clone`/`fork`/`wait4`, pipes,
+> signal delivery and `/dev/fb0` (needed by DOOM) - see [Roadmap](#roadmap).
 
 ![AtrodraX-RS desktop, Dark theme](docs/screenshot-dark.png)
 
@@ -192,7 +197,8 @@ Not yet implemented:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| **Linux ABI** (`syscall`/`sysret`, Linux syscall table) | ⏳ **planned** | Loader already tags Linux ELFs; the entry point and ~173 syscall handlers are the next milestone |
+| **Linux ABI** (`syscall`/`sysret`, Linux syscall table) | 🟡 **partial** | Entry point + ~30 syscalls work; static `hello_linux` runs. Missing `fstat`, `getdents64`, `execve`, `clone`/`wait4`, pipes, signals |
+| Kernel/user address-space separation | ⏳ planned | Kernel image currently occupies 1-66 MiB, the range static Linux binaries are linked at |
 | DOOM + `doom1.wad` | ⏳ blocked on Linux ABI | The game is a static Linux binary that opens `/dev/fb0` and `mmap`s the framebuffer |
 | `/dev/fb0` + generic `mmap` | ⏳ planned | Prerequisite for DOOM and any direct-framebuffer app |
 | Monitor protocol (PING/STAT/CRASH/EXEC over serial) | ⏳ | C kernel has it; Rust has a human debug console |

@@ -4,6 +4,7 @@ use crate::arch::gdt;
 use crate::arch::idt::TrapFrame;
 use crate::elf;
 use crate::fs::vfs;
+use crate::linux::abi;
 use crate::mem::vmm;
 use crate::task::{self, Pid};
 use alloc::string::String;
@@ -48,6 +49,73 @@ fn build_stack(space: &vmm::AddrSpace, argv: &[String]) -> (u64, u64, u64) {
 
     let rsp = pointer_area - 8;
     (rsp, argv.len() as u64, pointer_area)
+}
+
+/// Linux process startup block: `argc`, `argv`, `envp` and `auxv` on the
+/// stack, with `rsp` pointing at `argc`. This is what libc `_start` expects
+/// (the native AtrodraX crt0 instead takes `rdi`/`rsi`).
+fn build_linux_stack(space: &vmm::AddrSpace, argv: &[String], loaded: &elf::Loaded) -> u64 {
+    let mut cursor = USER_STACK_TOP - 16;
+    let mut pointers: Vec<u64> = Vec::new();
+    for argument in argv.iter().rev() {
+        let size = argument.len() as u64 + 1;
+        cursor -= size;
+        cursor &= !0xF;
+        copy_string(space, cursor, argument);
+        pointers.push(cursor);
+    }
+    pointers.reverse();
+
+    // AT_RANDOM points at 16 bytes libc may use to seed its canary.
+    cursor -= 16;
+    cursor &= !0xF;
+    let random_at = cursor;
+    let mut seed = crate::arch::cpu::rdtsc() ^ 0xA5A5_5A5A_1234_5678;
+    let mut random = [0u8; 16];
+    for byte in random.iter_mut() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        *byte = seed as u8;
+    }
+    vmm::write_user(space, random_at, &random);
+
+    let auxv: [(u64, u64); 12] = [
+        (abi::AT_PHDR, loaded.phdr),
+        (abi::AT_PHENT, loaded.phent),
+        (abi::AT_PHNUM, loaded.phnum),
+        (abi::AT_PAGESZ, abi::PAGE_SIZE),
+        (abi::AT_BASE, 0),
+        (abi::AT_ENTRY, loaded.entry),
+        (abi::AT_RANDOM, random_at),
+        (abi::AT_UID, 0),
+        (abi::AT_EUID, 0),
+        (abi::AT_GID, 0),
+        (abi::AT_EGID, 0),
+        (abi::AT_SECURE, 0),
+    ];
+
+    let words = 1 + pointers.len() as u64 + 1 + 1 + auxv.len() as u64 * 2 + 2;
+    let sp = (cursor - words * 8) & !0xF;
+
+    write_u64(space, sp, pointers.len() as u64);
+    let mut at = sp + 8;
+    for pointer in &pointers {
+        write_u64(space, at, *pointer);
+        at += 8;
+    }
+    write_u64(space, at, 0); // argv terminator
+    at += 8;
+    write_u64(space, at, 0); // envp terminator (empty environment)
+    at += 8;
+    for (kind, value) in auxv {
+        write_u64(space, at, kind);
+        write_u64(space, at + 8, value);
+        at += 16;
+    }
+    write_u64(space, at, abi::AT_NULL);
+    write_u64(space, at + 8, 0);
+    sp
 }
 
 fn resolve_path(path: &str) -> Option<usize> {
@@ -135,7 +203,11 @@ pub fn spawn(path: &str, argv: &[String]) -> Pid {
     } else {
         argv.to_vec()
     };
-    let (rsp, argc, argv_ptr) = build_stack(&space, &arguments);
+    let (rsp, argc, argv_ptr) = if loaded.linux_compat {
+        (build_linux_stack(&space, &arguments, &loaded), 0, 0)
+    } else {
+        build_stack(&space, &arguments)
+    };
 
     let frame = TrapFrame {
         rip: loaded.entry,
@@ -155,6 +227,7 @@ pub fn spawn(path: &str, argv: &[String]) -> Pid {
         let t = task::get(index);
         t.brk = loaded.brk_start;
         t.brk_start = loaded.brk_start;
+        t.mmap_base = 0x4000_0000;
         t.linux_compat = loaded.linux_compat;
     }
     crate::kprintln!("[exec] pid {} = {} (entry {:#x})", pid, path, loaded.entry);

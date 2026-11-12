@@ -86,6 +86,33 @@ pub unsafe fn invlpg(vaddr: u64) {
 }
 
 #[inline]
+pub fn rdmsr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    ((hi as u64) << 32) | lo as u64
+}
+
+#[inline]
+pub unsafe fn wrmsr(msr: u32, value: u64) {
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") value as u32,
+        in("edx") (value >> 32) as u32,
+        options(nomem, nostack, preserves_flags)
+    );
+}
+
+#[inline]
 pub fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;

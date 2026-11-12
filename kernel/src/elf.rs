@@ -11,6 +11,12 @@ pub struct Loaded {
     pub entry: u64,
     pub brk_start: u64,
     pub linux_compat: bool,
+    /// Address of the program header table in the loaded image.
+    pub phdr: u64,
+    pub phent: u64,
+    pub phnum: u64,
+    /// Load bias applied to ET_DYN images (zero for ET_EXEC).
+    pub bias: u64,
 }
 
 #[inline]
@@ -82,6 +88,7 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
     let bias: u64 = if kind == 3 { 0x40_0000 } else { 0 };
     let mut highest = 0u64;
     let mut linux_compat = entry < 0x1000_0000;
+    let mut has_interp = false;
 
     for index in 0..phnum {
         let ph = phoff + index * phentsize;
@@ -93,6 +100,7 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
         let p_memsz = u64_at(data, ph + 40) as usize;
 
         if p_type == PT_INTERP {
+            has_interp = true;
             linux_compat = true;
             continue;
         }
@@ -131,6 +139,10 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
         crate::kprintln!("[elf] no loadable segments");
         return None;
     }
+    if has_interp {
+        crate::kprintln!("[elf] dynamic binaries need an ELF interpreter (not supported yet)");
+        return None;
+    }
 
     let brk_start = (highest + 0xFFF) & !0xFFF;
     crate::kprintln!(
@@ -144,6 +156,10 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
         entry,
         brk_start,
         linux_compat,
+        phdr: phoff as u64 + bias,
+        phent: phentsize as u64,
+        phnum: phnum as u64,
+        bias,
     })
 }
 

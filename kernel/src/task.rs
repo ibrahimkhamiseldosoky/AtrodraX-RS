@@ -42,6 +42,8 @@ pub struct Task {
     pub space: Option<AddrSpace>,
     pub brk: u64,
     pub brk_start: u64,
+    /// Next address for Linux `mmap(MAP_ANONYMOUS)` allocations.
+    pub mmap_base: u64,
     pub wake_tick: u64,
     pub waiting_for: Pid,
     pub fds: Vec<Option<Fd>>,
@@ -117,6 +119,7 @@ pub fn create_user(name: &str, frame: TrapFrame, space: AddrSpace, argv0: &str) 
         space: Some(space),
         brk: 0,
         brk_start: 0,
+        mmap_base: 0x4000_0000,
         wake_tick: 0,
         waiting_for: 0,
         fds: vec![

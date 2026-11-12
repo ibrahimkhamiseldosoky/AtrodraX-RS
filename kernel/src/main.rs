@@ -33,6 +33,7 @@ pub mod sched;
 pub mod elf;
 pub mod exec;
 pub mod syscall;
+pub mod linux;
 pub mod system;
 
 use core::panic::PanicInfo;
@@ -101,6 +102,7 @@ pub extern "C" fn kernel_main(magic: u32, mb2_phys: u64) -> ! {
     drivers::rtc::init();
 
     syscall::init();
+    linux::init();
     task::init();
     sched::init();
     elf::selftest();
