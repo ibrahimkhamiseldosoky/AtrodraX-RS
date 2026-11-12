@@ -240,6 +240,11 @@ pub fn exit_current(code: i32) -> ! {
         if index >= 0 {
             let task = task::get(index as usize);
             task.exit_code = code;
+            // A fullscreen Linux program may own the framebuffer; hand it
+            // back to the compositor when the process goes away.
+            if crate::drivers::fb::direct_owner() == task.pid {
+                crate::drivers::fb::release_direct();
+            }
             task.state = if task.ppid > 0 { TASK_ZOMBIE } else { TASK_DEAD };
             let ppid = task.ppid;
             if ppid > 0 {

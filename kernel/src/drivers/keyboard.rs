@@ -22,6 +22,15 @@ const RING_SIZE: usize = 256;
 static mut RING: [u16; RING_SIZE] = [0; RING_SIZE];
 static mut HEAD: usize = 0;
 static mut TAIL: usize = 0;
+
+/// Raw scan-code events for the Linux ABI (`/dev/kbevents`): `(code, ext,
+/// pressed)`.  This is a second, independent ring so that the GUI key queue
+/// and a fullscreen Linux program can consume the same IRQ stream without
+/// stealing events from each other.
+const RAW_SIZE: usize = 256;
+static mut RAW: [(u8, u8, u8); RAW_SIZE] = [(0, 0, 0); RAW_SIZE];
+static mut RAW_HEAD: usize = 0;
+static mut RAW_TAIL: usize = 0;
 static mut SHIFT: bool = false;
 static mut CTRL: bool = false;
 static mut ALT: bool = false;
@@ -61,6 +70,8 @@ pub fn init() {
         CAPS = false;
         EXTENDED = false;
         RELEASE = false;
+        RAW_HEAD = 0;
+        RAW_TAIL = 0;
     }
     crate::kprintln!("[kbd] PS/2 keyboard ready (IRQ1)");
 }
@@ -72,6 +83,52 @@ fn push(key: u16) {
             RING[HEAD] = key;
             HEAD = next;
         }
+    }
+}
+
+fn push_raw(code: u8, ext: bool, pressed: bool) {
+    unsafe {
+        let next = (RAW_HEAD + 1) % RAW_SIZE;
+        if next != RAW_TAIL {
+            RAW[RAW_HEAD] = (code, ext as u8, pressed as u8);
+            RAW_HEAD = next;
+        }
+    }
+}
+
+/// True if a raw scan-code event is queued for the Linux ABI.
+pub fn has_raw_events() -> bool {
+    unsafe { RAW_HEAD != RAW_TAIL }
+}
+
+/// Pop one raw scan-code event: `(code, extended, pressed)`.
+pub fn next_raw_event() -> Option<(u8, u8, u8)> {
+    unsafe {
+        if RAW_TAIL == RAW_HEAD {
+            None
+        } else {
+            let event = RAW[RAW_TAIL];
+            RAW_TAIL = (RAW_TAIL + 1) % RAW_SIZE;
+            Some(event)
+        }
+    }
+}
+
+/// Discard queued decoded key events.  Used when a fullscreen Linux program
+/// hands the display back so keys it was consuming do not leak into the
+/// terminal afterwards.
+pub fn flush() {
+    unsafe {
+        TAIL = HEAD;
+    }
+}
+
+/// Discard any queued raw events.  Called when a program opens
+/// `/dev/kbevents` so keystrokes typed at the shell before the program started
+/// do not leak into it.
+pub fn flush_raw() {
+    unsafe {
+        RAW_TAIL = RAW_HEAD;
     }
 }
 
@@ -120,9 +177,10 @@ fn handle_scancode(sc: u8) {
         }
         let released = sc & 0x80 != 0;
         let code = sc & 0x7F;
-
-        if EXTENDED {
-            EXTENDED = false;
+        let ext = EXTENDED;
+        EXTENDED = false;
+        push_raw(code, ext, !released);
+        if ext {
             if !released {
                 let key = match code {
                     0x48 => KEY_UP,

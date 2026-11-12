@@ -12,14 +12,15 @@ There is no C in the kernel, no `libc`, and no external crate. The only non-Rust
 build input is the assembler source (`kernel/src/entry.S`), embedded with
 `global_asm!`; everything else uses `alloc` on top of a bare-metal Rust runtime.
 
-> **Linux ABI status: static glibc binaries, busybox and process control run.**
+> **Linux ABI status: static glibc/binaries, busybox, DOOM and process control run.**
 > The kernel installs a real `syscall`/`sysret` entry path (LSTAR/STAR/SFMASK
 > + `EFER.SCE`) and a growing static-binary syscall table: `read`, `write`,
-> `open`/`openat`, `close`, `dup`/`dup2`/`dup3`, `fcntl`, `pipe`/`pipe2`, `lseek`,
-> `brk`, anonymous `mmap`/`munmap`, `mprotect`, `arch_prctl`, `uname`, the
-> pid/uid/gid/group queries, `exit`/`exit_group`, `set_tid_address`,
-> `rt_sigaction`/`rt_sigprocmask`, `ioctl` (winsize/FIONREAD), `gettimeofday`,
-> `time`, `clock_gettime`, `getrandom`, `futex`, `nanosleep`,
+> `readv`/`writev`, `open`/`openat`, `close`, `dup`/`dup2`/`dup3`, `fcntl`,
+> `pipe`/`pipe2`, `lseek`, `brk`, anonymous and `/dev/fb0` `mmap`/`munmap`,
+> `mprotect`, `arch_prctl`, `uname`, the pid/uid/gid/group queries,
+> `exit`/`exit_group`, `set_tid_address`, `rt_sigaction`/`rt_sigprocmask`,
+> `ioctl` (winsize/FIONREAD + framebuffer info), `gettimeofday`, `time`,
+> `clock_gettime`, `getrandom`, `futex`, `nanosleep`, `mkdir`/`mkdirat`,
 > `stat`/`fstat`/`newfstatat`, `getdents64`, `statfs`/`fstatfs`, `getcwd`,
 > `prlimit64`, `prctl` and `set_robust_list`.
 > Statically linked x86-64 ELF binaries run in ring 3 with a SysV
@@ -30,12 +31,22 @@ build input is the assembler source (`kernel/src/entry.S`), embedded with
 > file reads, `opendir`/`readdir` and process identity; busybox 1.37 runs
 > `echo`, `cat`, `id`, `uname`, `ls`, `ls -l`, `df`, `wc`, `cp`, `sh -c` and
 > `time <program>` (fork + exec + wait + pipe).
+> `/dev` exposes `null`, `fb0` and `kbevents` as character devices. `mmap`ing
+> `fb0` maps the linear framebuffer's physical pages into the caller, the
+> framebuffer ioctls report its geometry, and `kbevents` streams raw PS/2 scan
+> codes as 4-byte `[code, extended, pressed, 0]` records. While a program owns
+> the framebuffer the kernel suspends its compositor, so fullscreen clients draw
+> straight to the screen.
 > The kernel runs everything through a PML4 direct map, so page tables and DMA
 > buffers are never reached through user-visible addresses, and it enables SSE
 > for libc's `memcpy`/`memset`.
+> **DOOM runs**: `run doom -iwad /doom1.wad -nosound` starts the prebuilt static
+> `doomgeneric` binary (Freedoom Phase 1), which renders through `/dev/fb0`,
+> takes keyboard input from `/dev/kbevents`, and hands the display back to the
+> compositor when it exits.
 > Dynamically linked binaries (`PT_INTERP`) are rejected with an explicit error.
-> Still missing: shared-memory threads (`CLONE_VM`), signal delivery and
-> `/dev/fb0` (needed by DOOM) - see [Roadmap](#roadmap).
+> Still missing: shared-memory threads (`CLONE_VM`) and signal delivery - see
+> [Roadmap](#status-and-roadmap).
 
 ![AtrodraX-RS desktop, Dark theme](docs/screenshot-dark.png)
 
@@ -54,8 +65,11 @@ build input is the assembler source (`kernel/src/entry.S`), embedded with
   titlebars, close/minimise buttons, taskbar, APPS menu, desktop icons, PSF2
   font and two live-switchable themes (Dark / Hacker).
 - **Apps**: Terminal, Files, Settings, About, Network Monitor and Editor are
-  kernel-side apps; 22 prebuilt userland programs live under `/bin`, including
+  kernel-side apps; 23 prebuilt userland programs live under `/bin`, including
   the shell, browser, compiler, package manager and network tools.
+- **DOOM**: the prebuilt static `doomgeneric` port runs fullscreen on the
+  framebuffer (`/dev/fb0` + `mmap`) with raw keyboard input from
+  `/dev/kbevents`; Freedoom Phase 1 ships as `/doom1.wad`.
 - **Filesystems**: RAMFS root with embedded programs, plus a FAT32 driver on
   virtio-blk mounted at `/disk` (read, write, create, delete, truncate;
   8.3 short names).
@@ -162,7 +176,7 @@ AtrodraX-RS
 │   │   ├── gfx/             font, themes, window manager, compositor, desktop
 │   │   ├── apps/            terminal, files, settings, about, netmon, editor
 │   │   └── diag/            self-tests, serial console, heartbeat, panic
-│   └── assets/              PSF2 font + 22 prebuilt userland ELFs
+│   └── assets/              PSF2 font + 23 prebuilt userland ELFs
 ├── docs/architecture.md     boot/memory/scheduler/GUI/network details
 └── tools/                   headless QEMU helpers (PowerShell + Python)
 ```
@@ -200,7 +214,7 @@ Implemented:
 | Round-robin ring-3 scheduling | ✅ |
 | ELF64 loader + native syscall ABI 0–41 | ✅ |
 | GUI compositor, windows, themes, taskbar | ✅ |
-| Kernel apps + 22 userland ELFs | ✅ |
+| Kernel apps + 23 userland ELFs | ✅ |
 | RAMFS + FAT32 read/write on virtio-blk | ✅ |
 | Theme/layout persistence (`OSST`) | ✅ |
 | e1000 + ARP/IPv4/ICMP/UDP/DHCP/DNS | ✅ |
@@ -211,10 +225,10 @@ Not yet implemented:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| **Linux ABI** (`syscall`/`sysret`, Linux syscall table) | 🟡 **partial** | Entry point + ~55 syscalls work; static glibc programs and busybox applets (`echo`, `cat`, `id`, `uname`, `ls`, `df`, `wc`, `cp`, `sh -c`, `time`) run. `fork`/`vfork`/`clone`, `wait4`, `execve`, pipes and `dup2` are in. Missing `CLONE_VM` threads, signal delivery and `/dev/fb0` |
+| **Linux ABI** (`syscall`/`sysret`, Linux syscall table) | 🟡 **partial** | Entry point + ~60 syscalls work; static glibc programs, busybox applets (`echo`, `cat`, `id`, `uname`, `ls`, `df`, `wc`, `cp`, `sh -c`, `time`) and DOOM run. `fork`/`vfork`/`clone`, `wait4`, `execve`, pipes and `dup2` are in. Missing `CLONE_VM` threads and signal delivery |
 | Kernel/user address-space separation | ✅ partial | Kernel + heap live at 256-320 MiB; user segments overlapping the image are rejected at load time |
-| DOOM + `doom1.wad` | ⏳ blocked on Linux ABI | The game is a static Linux binary that opens `/dev/fb0` and `mmap`s the framebuffer |
-| `/dev/fb0` + generic `mmap` | ⏳ planned | Prerequisite for DOOM and any direct-framebuffer app |
+| DOOM + `doom1.wad` | ✅ | Freedoom Phase 1 runs fullscreen via `/dev/fb0` + `mmap`, reads raw keys from `/dev/kbevents`, and restores the desktop on exit (`run doom -iwad /doom1.wad -nosound`) |
+| `/dev/fb0` + file-backed `mmap` | ✅ | Physical framebuffer pages are mapped user-writable; `FBIOGET_VSCREENINFO`/`FBIOGET_FSCREENINFO` report geometry. Other file-backed mappings still return `ENODEV` |
 | Monitor protocol (PING/STAT/CRASH/EXEC over serial) | ⏳ | C kernel has it; Rust has a human debug console |
 | Crash forensics ring + subsystem health scoring | ⏳ | Rust prints a register dump but keeps no records |
 | Window open/close animations, icon hover fades | ⏳ | Theme timings exist; compositor currently draws instantly |
@@ -249,6 +263,7 @@ run hello
 run ps
 run net
 run browser             # external GUI client: creates and draws its own window
+run doom -iwad /doom1.wad -nosound   # Freedoom Phase 1, fullscreen
 ```
 
 Headless GUI automation helpers live in `tools/`: `qtest.ps1` types shell
@@ -262,8 +277,9 @@ accept `-Qemu` / `-Disk` overrides.
 This project is a **rewrite, not a fork**: the C kernel is not linked or
 vendored here. The native syscall numbers, GUI opcodes, FAT layout and the
 `OSST` state-file format were kept compatible so the same prebuilt userland
-ELF binaries run unchanged. The 22 programs under `/bin` are the original
-AtrodraX userspace binaries.
+ELF binaries run unchanged. The 23 programs under `/bin` are the original
+AtrodraX userspace binaries (DOOM included); `/doom1.wad` is the Freedoom IWAD
+shipped by the C OS.
 
 ## License
 

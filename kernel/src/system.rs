@@ -28,9 +28,15 @@ fn init() {
 }
 
 fn pump_input(last: &mut mouse::MouseState, dirty: &mut bool) {
+    // A fullscreen Linux program owns the display and reads raw scan codes
+    // through /dev/kbevents.  Drain the GUI queue without dispatching so its
+    // keys neither pile up nor get typed into the window behind it.
+    let direct = crate::drivers::fb::direct_owner() >= 0;
     while let Some(key) = keyboard::poll() {
-        desktop::handle_key(key);
-        *dirty = true;
+        if !direct {
+            desktop::handle_key(key);
+            *dirty = true;
+        }
     }
 
     let current = mouse::state();
@@ -77,7 +83,11 @@ pub fn run() -> ! {
                 crate::arch::cpu::halt();
                 continue;
             }
-            compose_frame();
+            // While a Linux program owns the framebuffer, composing the hidden
+            // desktop would only steal CPU from it.
+            if crate::drivers::fb::direct_owner() < 0 {
+                compose_frame();
+            }
             desktop::clear_render_needed();
             last_frame = now;
             heartbeat::ping(heartbeat::HEARTBEAT_GUI);

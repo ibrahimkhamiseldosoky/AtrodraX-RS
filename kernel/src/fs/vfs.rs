@@ -110,6 +110,23 @@ pub fn create_dir(parent: usize, name: &str) -> Option<usize> {
     Some(create_node(Some(parent), name, KIND_DIR))
 }
 
+pub fn create_char(parent: usize, name: &str) -> Option<usize> {
+    if name.is_empty() || name.len() > VFS_NAME_MAX {
+        return None;
+    }
+    if find_child(parent, name).is_some() {
+        return None;
+    }
+    Some(create_node(Some(parent), name, KIND_CHAR))
+}
+
+/// True if `index` is a character device with the given name.  Uses the node
+/// name directly so no allocation is needed in the hot syscall paths.
+pub fn is_char_device(index: usize, name: &str) -> bool {
+    let node = node(index);
+    node.kind == KIND_CHAR && node.name == name
+}
+
 pub fn find_child(parent: usize, name: &str) -> Option<usize> {
     let vfs = fs();
     vfs.nodes[parent]

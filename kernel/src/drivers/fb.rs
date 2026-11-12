@@ -27,6 +27,34 @@ static mut FB: Framebuffer = Framebuffer {
 
 static mut BACKBUFFER: Option<Vec<u32>> = None;
 
+/// PID of a Linux process that mapped `/dev/fb0` and is drawing directly into
+/// the live framebuffer (-1 when nobody owns it).  While the framebuffer is
+/// owned the compositor must not blit its own backbuffer over the program.
+static mut DIRECT_OWNER: i32 = -1;
+
+pub fn claim_direct(pid: i32) {
+    unsafe {
+        DIRECT_OWNER = pid;
+    }
+}
+
+pub fn release_direct() {
+    unsafe {
+        DIRECT_OWNER = -1;
+    }
+    // Keys typed at the program are not shell input.
+    crate::drivers::keyboard::flush();
+}
+
+pub fn direct_owner() -> i32 {
+    unsafe { DIRECT_OWNER }
+}
+
+/// Size of one full frame in the physical framebuffer (pitch * height).
+pub fn size_bytes() -> usize {
+    pitch() * height()
+}
+
 pub fn init() {
     let info = boot::framebuffer();
     unsafe {
@@ -202,7 +230,7 @@ pub fn rect_outline(x: i32, y: i32, w: i32, h: i32, color: u32) {
 }
 
 pub fn present() {
-    if !is_ready() {
+    if !is_ready() || direct_owner() >= 0 {
         return;
     }
     unsafe {

@@ -196,6 +196,12 @@ pub const TCSETS: u64 = 0x5402;
 pub const TIOCGWINSZ: u64 = 0x5413;
 pub const FIONREAD: u64 = 0x541B;
 
+/* ── framebuffer ioctls (`/dev/fb0`) ───────────────────────────────────── */
+
+pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
+pub const FBIOPUT_VSCREENINFO: u64 = 0x4601;
+pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
+
 /* ── clock_gettime(2) ──────────────────────────────────────────────────── */
 
 pub const CLOCK_REALTIME: u64 = 0;

@@ -73,6 +73,10 @@ pub fn dispatch(context: &UserContext) -> u64 {
     match num {
         SYS_READ => sys_read(a0 as i32, a1, a2 as usize),
         SYS_WRITE => sys_write(a0 as i32, a1, a2 as usize),
+        SYS_READV => sys_readv(a0 as i32, a1, a2 as usize),
+        SYS_WRITEV => sys_writev(a0 as i32, a1, a2 as usize),
+        SYS_MKDIR => sys_mkdir(AT_FDCWD, a0),
+        SYS_MKDIRAT => sys_mkdir(a0 as i64, a1),
         SYS_OPEN => sys_openat(AT_FDCWD, a0, a1 as i32),
         SYS_OPENAT => sys_openat(a0 as i64, a1, a2 as i32),
         SYS_CLOSE => sys_close(a0 as i32),
@@ -138,8 +142,12 @@ pub fn dispatch(context: &UserContext) -> u64 {
 
 /// `struct stat` as x86-64 Linux lays it out (144 bytes).
 fn fill_stat(node: usize, out: &mut [u8; 144]) {
-    let is_dir = node != CONSOLE_NODE && vfs::is_directory(node);
-    let (kind, size) = if node == CONSOLE_NODE {
+    let is_char = node == CONSOLE_NODE
+        || vfs::get(node)
+            .map(|n| n.kind == vfs::KIND_CHAR)
+            .unwrap_or(false);
+    let is_dir = !is_char && vfs::is_directory(node);
+    let (kind, size) = if is_char {
         (S_IFCHR | 0o620, 0)
     } else if is_dir {
         (S_IFDIR | 0o755, 0)
@@ -544,6 +552,14 @@ fn sys_write(fd: i32, buffer: u64, len: usize) -> u64 {
         }
         return written as u64;
     }
+    // Character devices: writes to /dev/null (and the framebuffer, which is
+    // memory-mapped) are discarded but succeed.
+    if vfs::is_char_device(entry.node, "null") || vfs::is_char_device(entry.node, "fb0") {
+        return data.len() as u64;
+    }
+    if vfs::is_char_device(entry.node, "kbevents") {
+        return errno(EINVAL);
+    }
     let written = vfs::write(entry.node, entry.offset, &data);
     if let Some(entry) = task::get_fd(index, fd) {
         entry.offset += written;
@@ -615,6 +631,34 @@ fn sys_read(fd: i32, buffer: u64, len: usize) -> u64 {
     if vfs::is_directory(entry.node) {
         return errno(EISDIR);
     }
+    // Character devices: raw keyboard events and /dev/null.
+    if vfs::is_char_device(entry.node, "kbevents") {
+        if !crate::drivers::keyboard::has_raw_events() {
+            return 0;
+        }
+        let events = (len / 4).min(256);
+        let mut buf = Vec::with_capacity(events * 4);
+        while buf.len() / 4 < events {
+            match crate::drivers::keyboard::next_raw_event() {
+                Some((code, ext, pressed)) => buf.extend_from_slice(&[code, ext, pressed, 0]),
+                None => break,
+            }
+        }
+        if buf.is_empty() {
+            return 0;
+        }
+        return if syscall::copy_to_user(&space, buffer, &buf) {
+            buf.len() as u64
+        } else {
+            errno(EFAULT)
+        };
+    }
+    if vfs::is_char_device(entry.node, "null") {
+        return 0;
+    }
+    if vfs::is_char_device(entry.node, "fb0") {
+        return errno(EINVAL);
+    }
     let data = vfs::read(entry.node, entry.offset, len);
     if !syscall::copy_to_user(&space, buffer, &data) {
         return errno(EFAULT);
@@ -623,6 +667,87 @@ fn sys_read(fd: i32, buffer: u64, len: usize) -> u64 {
         entry.offset += data.len();
     }
     data.len() as u64
+}
+
+/// Read an `iovec` array and feed it to the regular read path.  musl uses
+/// `readv` for buffered `FILE *` input, which is exactly how DOOM reads the
+/// WAD, so a plain `read` is not enough.
+fn sys_readv(fd: i32, iov_ptr: u64, count: usize) -> u64 {
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let count = count.min(1024);
+    let mut total = 0u64;
+    for index in 0..count {
+        let Some(raw) = syscall::copy_from_user(&space, iov_ptr + index as u64 * 16, 16) else {
+            return if total > 0 { total } else { errno(EFAULT) };
+        };
+        let base = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let len = u64::from_le_bytes(raw[8..16].try_into().unwrap()) as usize;
+        if len == 0 {
+            continue;
+        }
+        let read = sys_read(fd, base, len);
+        if (read as i64) < 0 {
+            return if total > 0 { total } else { read };
+        }
+        total += read;
+        if (read as usize) < len {
+            break;
+        }
+    }
+    total
+}
+
+/// Gather-write counterpart of `readv`; musl's `__stdio_write` flushes stdio
+/// buffers with it.
+fn sys_writev(fd: i32, iov_ptr: u64, count: usize) -> u64 {
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let count = count.min(1024);
+    let mut total = 0u64;
+    for index in 0..count {
+        let Some(raw) = syscall::copy_from_user(&space, iov_ptr + index as u64 * 16, 16) else {
+            return if total > 0 { total } else { errno(EFAULT) };
+        };
+        let base = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let len = u64::from_le_bytes(raw[8..16].try_into().unwrap()) as usize;
+        if len == 0 {
+            continue;
+        }
+        let written = sys_write(fd, base, len);
+        if (written as i64) < 0 {
+            return if total > 0 { total } else { written };
+        }
+        total += written;
+        if (written as usize) < len {
+            break;
+        }
+    }
+    total
+}
+
+fn sys_mkdir(dirfd: i64, path_ptr: u64) -> u64 {
+    let _ = dirfd;
+    let Some(index) = task_index() else {
+        return errno(ESRCH);
+    };
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let Some(path) = syscall::read_cstr(&space, path_ptr, 256) else {
+        return errno(EFAULT);
+    };
+    let cwd = task::get(index).cwd.clone();
+    if vfs::resolve(&path, &cwd).is_some() {
+        return errno(EEXIST);
+    }
+    if vfs::mkdir(&path, &cwd) {
+        0
+    } else {
+        errno(ENOENT)
+    }
 }
 
 fn sys_openat(dirfd: i64, path_ptr: u64, flags: i32) -> u64 {
@@ -648,6 +773,10 @@ fn sys_openat(dirfd: i64, path_ptr: u64, flags: i32) -> u64 {
     };
     if vfs::is_directory(node) && flags & 0o3 != 0 {
         return errno(EISDIR);
+    }
+    if vfs::is_char_device(node, "kbevents") {
+        // Drop shell keystrokes typed before the program opened the device.
+        crate::drivers::keyboard::flush_raw();
     }
     if flags & O_TRUNC != 0 && !vfs::is_directory(node) {
         vfs::truncate(node, 0);
@@ -863,7 +992,6 @@ fn sys_mmap(addr: u64, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) 
     let Some(index) = task_index() else {
         return errno(ESRCH);
     };
-    let _ = offset;
     if len == 0 {
         return errno(EINVAL);
     }
@@ -872,13 +1000,56 @@ fn sys_mmap(addr: u64, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) 
     };
     let len = ((len as u64) + 0xFFF) & !0xFFF;
 
-    // Only anonymous memory is backed for now; file-backed mappings need a
-    // page cache and are deferred with the /dev/fb0 work.
+    // Only the framebuffer is file-backed so far: map its physical pages
+    // straight into the caller so a Linux program (DOOM) can draw directly.
     if flags & MAP_ANONYMOUS == 0 {
-        if fd >= 0 {
+        if fd < 0 {
+            return errno(EINVAL);
+        }
+        let Some(entry) = task::get_fd(index, fd).copied() else {
+            return errno(EBADF);
+        };
+        if !vfs::is_char_device(entry.node, "fb0") {
             return errno(ENODEV);
         }
-        return errno(EINVAL);
+        if !crate::drivers::fb::is_ready() {
+            return errno(ENODEV);
+        }
+        if offset < 0 {
+            return errno(EINVAL);
+        }
+        let fb_base = crate::drivers::fb::address();
+        let fb_size = crate::drivers::fb::size_bytes() as u64;
+        let off = (offset as u64) & !(PAGE_SIZE - 1);
+        if off >= fb_size {
+            return errno(EINVAL);
+        }
+        let map_len = len.min(fb_size - off);
+        let base = if flags & MAP_FIXED != 0 {
+            addr & !0xFFF
+        } else {
+            task::get(index).mmap_base.max(0x4000_0000)
+        };
+        if base < 0x4000_0000 {
+            return errno(EINVAL);
+        }
+        if base.checked_add(map_len).map_or(true, |end| end > crate::mem::FOUR_GIB) {
+            return errno(ENOMEM);
+        }
+        let mut page = 0u64;
+        while page < map_len {
+            let paddr = (fb_base + off + page) & !(PAGE_SIZE - 1);
+            if !vmm::map_user_page(&space, base + page, paddr, true) {
+                return errno(ENOMEM);
+            }
+            page += PAGE_SIZE;
+        }
+        if flags & MAP_FIXED == 0 {
+            task::get(index).mmap_base = base + map_len + PAGE_SIZE;
+        }
+        // Stop the compositor from blitting its backbuffer over the program.
+        crate::drivers::fb::claim_direct(task::get(index).pid);
+        return base;
     }
 
     let base = if flags & MAP_FIXED != 0 {
@@ -914,6 +1085,9 @@ fn sys_exit(code: i32) -> u64 {
         return errno(ESRCH);
     };
     let pid = task::get(index).pid;
+    if crate::drivers::fb::direct_owner() == pid {
+        crate::drivers::fb::release_direct();
+    }
     apps::notify_death(pid);
     for fd in 0..task::MAX_FDS as i32 {
         if task::get_fd(index, fd).is_some() {
@@ -1017,6 +1191,57 @@ fn sys_ioctl(fd: i32, request: u64, arg: u64) -> u64 {
         // Termios translation is not modelled; accepting the write keeps
         // programs that call tcsetattr() happy.
         TCSETS => 0,
+        FBIOGET_VSCREENINFO => {
+            let Some(space) = syscall::current_space() else {
+                return errno(EFAULT);
+            };
+            let mut var = [0u8; 160];
+            let w = crate::drivers::fb::width() as u32;
+            let h = crate::drivers::fb::height() as u32;
+            put_u32(&mut var, 0, w); // xres
+            put_u32(&mut var, 4, h); // yres
+            put_u32(&mut var, 8, w); // xres_virtual
+            put_u32(&mut var, 12, h); // yres_virtual
+            put_u32(&mut var, 24, crate::drivers::fb::bpp() as u32);
+            // 32-bit BGRX: red 16, green 8, blue 0.
+            put_u32(&mut var, 32, 16);
+            put_u32(&mut var, 36, 8);
+            put_u32(&mut var, 44, 8);
+            put_u32(&mut var, 48, 8);
+            put_u32(&mut var, 56, 0);
+            put_u32(&mut var, 60, 8);
+            put_u32(&mut var, 68, 24);
+            put_u32(&mut var, 72, 8);
+            if syscall::copy_to_user(&space, arg, &var) {
+                0
+            } else {
+                errno(EFAULT)
+            }
+        }
+        // No mode switching: accept and ignore.
+        FBIOPUT_VSCREENINFO => 0,
+        FBIOGET_FSCREENINFO => {
+            let Some(space) = syscall::current_space() else {
+                return errno(EFAULT);
+            };
+            let mut fix = [0u8; 80];
+            let id = b"ATRODRAX";
+            fix[..id.len()].copy_from_slice(id);
+            put_u64(&mut fix, 16, crate::drivers::fb::address());
+            put_u32(
+                &mut fix,
+                24,
+                crate::drivers::fb::size_bytes() as u32,
+            );
+            put_u32(&mut fix, 28, 0); // FB_TYPE_PACKED_PIXELS
+            put_u32(&mut fix, 36, 2); // FB_VISUAL_TRUECOLOR
+            put_u32(&mut fix, 48, crate::drivers::fb::pitch() as u32);
+            if syscall::copy_to_user(&space, arg, &fix) {
+                0
+            } else {
+                errno(EFAULT)
+            }
+        }
         _ => errno(ENOTTY),
     }
 }
@@ -1039,14 +1264,35 @@ fn unix_time() -> i64 {
     days * 86_400 + t.hour as i64 * 3_600 + t.minute as i64 * 60 + t.second as i64
 }
 
+/// Wall-clock time with microsecond resolution.  It is anchored once to the
+/// CMOS clock and then advanced from the monotonic tick counter, so it never
+/// jumps backwards at a second boundary (DOOM's frame timer treats a negative
+/// delta as a huge unsigned value and stalls).
+fn realtime_us() -> (i64, i64) {
+    static mut BASE_SECS: i64 = 0;
+    static mut BASE_MS: u64 = 0;
+    unsafe {
+        let now_ms = crate::sync::uptime_ms();
+        if BASE_SECS == 0 {
+            BASE_SECS = unix_time();
+            BASE_MS = now_ms;
+        }
+        let elapsed = now_ms.saturating_sub(BASE_MS);
+        (
+            BASE_SECS + (elapsed / 1000) as i64,
+            ((elapsed % 1000) * 1000) as i64,
+        )
+    }
+}
+
 fn sys_gettimeofday(out: u64) -> u64 {
     let Some(space) = syscall::current_space() else {
         return errno(EFAULT);
     };
-    let seconds = unix_time();
+    let (seconds, micros) = realtime_us();
     let mut buf = [0u8; 16];
     buf[..8].copy_from_slice(&seconds.to_le_bytes());
-    // Timeval microseconds are always zero at this resolution.
+    buf[8..].copy_from_slice(&micros.to_le_bytes());
     if syscall::copy_to_user(&space, out, &buf) {
         0
     } else {
@@ -1072,7 +1318,8 @@ fn sys_clock_gettime(clock: u64, out: u64) -> u64 {
         return errno(EFAULT);
     };
     let (seconds, nanos) = if clock == CLOCK_REALTIME {
-        (unix_time(), 0)
+        let (secs, micros) = realtime_us();
+        (secs, micros * 1000)
     } else {
         let ms = crate::sync::uptime_ms();
         ((ms / 1000) as i64, ((ms % 1000) * 1_000_000) as i64)

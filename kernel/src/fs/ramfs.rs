@@ -71,7 +71,9 @@ pub fn populate() {
          test FAT32 writes on disk.img\n\
          run DOOM under the Linux compatibility layer\n",
     );
-    write_file(dev, "null", "");
+    vfs::create_char(dev, "null");
+    vfs::create_char(dev, "fb0");
+    vfs::create_char(dev, "kbevents");
 
     // Linux programs that enumerate mounts (`df`, `mount`, `findmnt`) read the
     // traditional table. Everything lives in one RAMFS, so a single root entry
@@ -97,6 +99,7 @@ pub fn populate() {
         "fork_test",
         "pipe_test",
         "libc_hello",
+        "doom",
         "busybox",
         "htmld",
         "imgview",
@@ -112,10 +115,14 @@ pub fn populate() {
         "browser",
     );
 
+    // DOOM's IWAD lives at the root, mirroring the C OS layout so the same
+    // command line (`doom -iwad /doom1.wad`) works.
+    write_binary(root, "doom1.wad", include_bytes!("../../assets/doom1.wad"));
+
     let _ = (bin, tmp, dev, KIND_DIR, KIND_FILE);
 
     crate::kprintln!(
         "[ramfs] populated / with README, /etc, /home, /tmp, /disk, /dev, /bin ({} programs)",
-        26
+        27
     );
 }

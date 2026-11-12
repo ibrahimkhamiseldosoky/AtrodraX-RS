@@ -267,6 +267,18 @@ pub fn translate(space: &AddrSpace, vaddr: u64) -> Option<u64> {    unsafe {
     }
 }
 
+/// True when `paddr` lies inside the linear framebuffer MMIO window.  Those
+/// pages come from device memory, not the physical allocator, so they must
+/// never be returned to it when an address space is torn down.
+fn is_framebuffer_page(paddr: u64) -> bool {
+    let base = crate::drivers::fb::address();
+    if base == 0 {
+        return false;
+    }
+    let size = crate::drivers::fb::size_bytes() as u64;
+    paddr >= base && paddr < base + size
+}
+
 pub fn destroy(space: AddrSpace) {
     unsafe {
         let pml4 = table_at(space.pml4_phys);
@@ -294,7 +306,10 @@ pub fn destroy(space: AddrSpace) {
                         let entry = *pt.add(pt_index);
                         if entry & PTE_PRESENT != 0 && entry & PTE_USER != 0 {
                             has_user = true;
-                            pmm::free_page(entry & PHYS_MASK);
+                            let paddr = entry & PHYS_MASK;
+                            if !is_framebuffer_page(paddr) {
+                                pmm::free_page(paddr);
+                            }
                         }
                     }
                     if has_user {
@@ -332,6 +347,11 @@ pub fn copy_space(source: &AddrSpace) -> Option<AddrSpace> {
                 for pt_index in 0..512 {
                     let entry = *pt.add(pt_index);
                     if entry & PTE_PRESENT != 0 && entry & PTE_USER != 0 {
+                        // Never duplicate the framebuffer MMIO window into a
+                        // forked child: it is device memory, not RAM.
+                        if is_framebuffer_page(entry & PHYS_MASK) {
+                            continue;
+                        }
                         let vaddr = ((pdpt_index as u64) << 30)
                             | ((pd_index as u64) << 21)
                             | ((pt_index as u64) << 12);
