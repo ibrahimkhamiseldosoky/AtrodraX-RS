@@ -59,6 +59,30 @@ linux_syscall_entry:
 
     addq $8, %rsp             /* drop a5 */
 
+    /* execve() replaced the image: resume in the new program instead of
+     * returning to the old one. Frame slots (after the drop):
+     *   0 r9, 8 r8, 16 r10, 24 rdx, 32 rsi, 40 rdi, 48 r11, 56 rcx, 64 rsp
+     */
+    cmpq $0, linux_exec_pending(%rip)
+    je 1f
+    movq $0, linux_exec_pending(%rip)
+    movq linux_exec_rsp(%rip), %rax
+    movq %rax, 64(%rsp)       /* user RSP, popped into rsp last */
+    movq linux_exec_rip(%rip), %rax
+    movq %rax, 56(%rsp)       /* RCX -> user RIP for sysret */
+    movq linux_exec_flags(%rip), %rax
+    movq %rax, 48(%rsp)       /* R11 -> RFLAGS for sysret */
+    /* A fresh image starts with undefined general registers, but crt0 relies
+     * on the argument slots being clear. */
+    movq $0, 40(%rsp)         /* rdi */
+    movq $0, 32(%rsp)         /* rsi */
+    movq $0, 24(%rsp)         /* rdx */
+    movq $0, 16(%rsp)         /* r10 */
+    movq $0, 8(%rsp)          /* r8 */
+    movq $0, 0(%rsp)          /* r9 */
+    xorl %eax, %eax
+1:
+
     popq %r9
     popq %r8
     popq %r10

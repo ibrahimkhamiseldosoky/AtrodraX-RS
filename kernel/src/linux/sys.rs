@@ -12,6 +12,7 @@ use crate::mem::vmm;
 use crate::sched;
 use crate::syscall;
 use crate::task::{self, CONSOLE_NODE};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -77,6 +78,7 @@ pub fn dispatch(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) 
         SYS_GETGROUPS => 0,
         SYS_SETGROUPS => 0,
         SYS_EXIT | SYS_EXIT_GROUP => sys_exit(a0 as i32),
+        SYS_EXECVE => sys_execve(a0, a1, a2),
         SYS_SET_TID_ADDRESS => task_pid(),
         SYS_RT_SIGACTION => sys_rt_sigaction(a0, a1, a2),
         SYS_RT_SIGPROCMASK => 0,
@@ -272,6 +274,51 @@ fn sys_prlimit64(_pid: u64, resource: u64, _new_limit: u64, old_limit: u64) -> u
         0
     } else {
         errno(EFAULT)
+    }
+}
+
+/* ── Process control ───────────────────────────────────────────────────── */
+
+/// Read a NULL-terminated array of string pointers from user memory.
+fn read_string_array(space: &vmm::AddrSpace, pointer: u64, limit: usize) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    if pointer == 0 {
+        return Some(out);
+    }
+    for index in 0..limit {
+        let raw = syscall::copy_from_user(space, pointer + index as u64 * 8, 8)?;
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&raw);
+        let address = u64::from_le_bytes(word);
+        if address == 0 {
+            return Some(out);
+        }
+        out.push(syscall::read_cstr(space, address, 4096)?);
+    }
+    Some(out)
+}
+
+fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
+    let Some(space) = syscall::current_space() else {
+        return errno(EFAULT);
+    };
+    let Some(path) = syscall::read_cstr(&space, path_ptr, 1024) else {
+        return errno(EFAULT);
+    };
+    if path.is_empty() {
+        return errno(ENOENT);
+    }
+    let Some(argv) = read_string_array(&space, argv_ptr, 256) else {
+        return errno(EFAULT);
+    };
+    let Some(envp) = read_string_array(&space, envp_ptr, 256) else {
+        return errno(EFAULT);
+    };
+    // On success `replace` never returns to this program: the SYSCALL stub
+    // resumes in the freshly loaded image.
+    match crate::exec::replace(&path, &argv, &envp) {
+        Ok(()) => 0,
+        Err(code) => errno(code),
     }
 }
 

@@ -65,6 +65,31 @@ pub fn init() {
     );
 }
 
+/// Frame the SYSCALL stub should return into instead of the caller, used by
+/// `execve`. Written by [`request_exec_frame`]; consumed by `entry.S`.
+#[no_mangle]
+pub static mut linux_exec_pending: u64 = 0;
+#[no_mangle]
+pub static mut linux_exec_rsp: u64 = 0;
+#[no_mangle]
+pub static mut linux_exec_rip: u64 = 0;
+#[no_mangle]
+pub static mut linux_exec_flags: u64 = 0;
+
+/// Make the current `SYSCALL` return into `rip` with a fresh stack.
+///
+/// `execve` replaces the task's address space; the syscall frame on the kernel
+/// stack still describes the old program, so the stub overwrites it before
+/// `sysret`.
+pub fn request_exec_frame(rsp: u64, rip: u64, rflags: u64) {
+    unsafe {
+        linux_exec_rsp = rsp;
+        linux_exec_rip = rip;
+        linux_exec_flags = rflags;
+        linux_exec_pending = 1;
+    }
+}
+
 /// Called from `entry.S` with the Linux argument registers already marshalled.
 #[no_mangle]
 pub extern "C" fn linux_syscall_dispatch(

@@ -93,6 +93,7 @@ pub fn populate() {
         "fs_tool",
         "hello",
         "hello_linux",
+        "exec_hello",
         "libc_hello",
         "busybox",
         "htmld",
@@ -113,6 +114,6 @@ pub fn populate() {
 
     crate::kprintln!(
         "[ramfs] populated / with README, /etc, /home, /tmp, /disk, /dev, /bin ({} programs)",
-        23
+        24
     );
 }

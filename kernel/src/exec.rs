@@ -56,7 +56,12 @@ fn build_stack(space: &vmm::AddrSpace, argv: &[String]) -> (u64, u64, u64) {
 /// Linux process startup block: `argc`, `argv`, `envp` and `auxv` on the
 /// stack, with `rsp` pointing at `argc`. This is what libc `_start` expects
 /// (the native AtrodraX crt0 instead takes `rdi`/`rsi`).
-fn build_linux_stack(space: &vmm::AddrSpace, argv: &[String], loaded: &elf::Loaded) -> u64 {
+fn build_linux_stack(
+    space: &vmm::AddrSpace,
+    argv: &[String],
+    env: &[String],
+    loaded: &elf::Loaded,
+) -> u64 {
     let mut cursor = USER_STACK_TOP - 16;
     let mut pointers: Vec<u64> = Vec::new();
     for argument in argv.iter().rev() {
@@ -67,6 +72,16 @@ fn build_linux_stack(space: &vmm::AddrSpace, argv: &[String], loaded: &elf::Load
         pointers.push(cursor);
     }
     pointers.reverse();
+
+    let mut env_pointers: Vec<u64> = Vec::new();
+    for variable in env.iter().rev() {
+        let size = variable.len() as u64 + 1;
+        cursor -= size;
+        cursor &= !0xF;
+        copy_string(space, cursor, variable);
+        env_pointers.push(cursor);
+    }
+    env_pointers.reverse();
 
     // AT_RANDOM points at 16 bytes libc may use to seed its canary.
     cursor -= 16;
@@ -97,7 +112,13 @@ fn build_linux_stack(space: &vmm::AddrSpace, argv: &[String], loaded: &elf::Load
         (abi::AT_SECURE, 0),
     ];
 
-    let words = 1 + pointers.len() as u64 + 1 + 1 + auxv.len() as u64 * 2 + 2;
+    let words = 1
+        + pointers.len() as u64
+        + 1
+        + env_pointers.len() as u64
+        + 1
+        + auxv.len() as u64 * 2
+        + 2;
     let sp = (cursor - words * 8) & !0xF;
 
     write_u64(space, sp, pointers.len() as u64);
@@ -108,7 +129,11 @@ fn build_linux_stack(space: &vmm::AddrSpace, argv: &[String], loaded: &elf::Load
     }
     write_u64(space, at, 0); // argv terminator
     at += 8;
-    write_u64(space, at, 0); // envp terminator (empty environment)
+    for pointer in &env_pointers {
+        write_u64(space, at, *pointer);
+        at += 8;
+    }
+    write_u64(space, at, 0); // envp terminator
     at += 8;
     for (kind, value) in auxv {
         write_u64(space, at, kind);
@@ -155,61 +180,82 @@ fn base_name(path: &str) -> String {
         .into()
 }
 
-/// Load `path` and create a new task. Returns the PID, or -1 on failure.
-pub fn spawn(path: &str, argv: &[String]) -> Pid {
-    let node = match resolve_path(path) {
-        Some(node) => node,
-        None => {
-            crate::kprintln!("[exec] {}: not found", path);
-            return -1;
-        }
-    };
+/// Environment handed to programs started by the native shell.
+pub fn default_env() -> Vec<String> {
+    vec![
+        String::from("PATH=/bin:/usr/bin:/sbin"),
+        String::from("HOME=/home/user"),
+        String::from("TERM=linux"),
+        String::from("USER=root"),
+    ]
+}
+
+struct Prepared {
+    space: vmm::AddrSpace,
+    loaded: elf::Loaded,
+    rsp: u64,
+    argc: u64,
+    argv_ptr: u64,
+}
+
+/// Load `path` into a fresh address space and build its initial stack.
+fn prepare(path: &str, argv: &[String], env: &[String]) -> Result<Prepared, i64> {
+    let node = resolve_path(path).ok_or(abi::ENOENT)?;
     if vfs::is_directory(node) {
-        crate::kprintln!("[exec] {}: is a directory", path);
-        return -1;
+        return Err(abi::EISDIR);
     }
     let image = vfs::read_all(node);
-    if image.is_empty() {
-        crate::kprintln!("[exec] {}: empty image", path);
-        return -1;
+    if image.is_empty() || !elf::is_elf(&image) {
+        return Err(abi::ENOEXEC);
     }
-    if !elf::is_elf(&image) {
-        crate::kprintln!("[exec] {}: not an ELF executable", path);
-        return -1;
-    }
-
-    let space = match vmm::create() {
-        Some(space) => space,
-        None => {
-            crate::kprintln!("[exec] out of memory creating address space");
-            return -1;
-        }
-    };
-
+    let space = vmm::create().ok_or(abi::ENOMEM)?;
     let loaded = match elf::load(&space, &image) {
         Some(loaded) => loaded,
         None => {
             vmm::destroy(space);
-            return -1;
+            return Err(abi::ENOEXEC);
         }
     };
-
     if !vmm::map_user_range(&space, USER_STACK_VIRT, USER_STACK_TOP, true) {
-        crate::kprintln!("[exec] failed to map user stack");
         vmm::destroy(space);
-        return -1;
+        return Err(abi::ENOMEM);
     }
-
     let arguments: Vec<String> = if argv.is_empty() {
         vec![base_name(path)]
     } else {
         argv.to_vec()
     };
     let (rsp, argc, argv_ptr) = if loaded.linux_compat {
-        (build_linux_stack(&space, &arguments, &loaded), 0, 0)
+        (build_linux_stack(&space, &arguments, env, &loaded), 0, 0)
     } else {
         build_stack(&space, &arguments)
     };
+    Ok(Prepared {
+        space,
+        loaded,
+        rsp,
+        argc,
+        argv_ptr,
+    })
+}
+
+/// Load `path` and create a new task. Returns the PID, or -1 on failure.
+pub fn spawn(path: &str, argv: &[String]) -> Pid {
+    let env = default_env();
+    let prepared = match prepare(path, argv, &env) {
+        Ok(prepared) => prepared,
+        Err(code) => {
+            crate::kprintln!("[exec] {}: cannot start (errno {})", path, code);
+            return -1;
+        }
+    };
+    let Prepared {
+        space,
+        loaded,
+        rsp,
+        argc,
+        argv_ptr,
+    } = prepared;
 
     let frame = TrapFrame {
         rip: loaded.entry,
@@ -234,6 +280,47 @@ pub fn spawn(path: &str, argv: &[String]) -> Pid {
     }
     crate::kprintln!("[exec] pid {} = {} (entry {:#x})", pid, path, loaded.entry);
     pid
+}
+
+/// `execve(2)`: replace the calling task's image in place.
+///
+/// The new address space is built first; only then is the old one torn down,
+/// so a failing `execve` leaves the caller untouched. Success is reported by
+/// telling the SYSCALL stub to return into the new image (see
+/// [`crate::linux::request_exec_frame`]) - this function never returns to the
+/// old program.
+pub fn replace(path: &str, argv: &[String], env: &[String]) -> Result<(), i64> {
+    let prepared = prepare(path, argv, env)?;
+    if !prepared.loaded.linux_compat {
+        // A Linux process cannot turn itself into a native AtrodraX binary:
+        // the entry conventions differ.
+        vmm::destroy(prepared.space);
+        return Err(abi::ENOEXEC);
+    }
+
+    let index = crate::sched::current_index();
+    let task = task::get(index);
+    let old_space = task.space;
+    task.space = Some(prepared.space);
+    task.brk = prepared.loaded.brk_start;
+    task.brk_start = prepared.loaded.brk_start;
+    task.mmap_base = 0x4000_0000;
+    task.linux_compat = true;
+    task.fs_base = 0;
+    task.name = base_name(path);
+
+    crate::linux::request_exec_frame(prepared.rsp, prepared.loaded.entry, 0x202);
+    vmm::load(prepared.space.pml4_phys);
+    if let Some(old) = old_space {
+        vmm::destroy(old);
+    }
+    crate::kprintln!(
+        "[exec] pid {} execve {} (entry {:#x})",
+        task::get(index).pid,
+        path,
+        prepared.loaded.entry
+    );
+    Ok(())
 }
 
 pub fn spawn_path(path: &str) -> Pid {
