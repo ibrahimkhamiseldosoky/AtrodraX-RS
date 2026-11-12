@@ -6,6 +6,21 @@ pub const PT_LOAD: u32 = 1;
 pub const PT_INTERP: u32 = 3;
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
+extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
+
+/// Physical/virtual range occupied by the kernel image and its heap arena.
+fn kernel_range() -> (u64, u64) {
+    unsafe {
+        (
+            core::ptr::addr_of!(__kernel_start) as u64,
+            core::ptr::addr_of!(__kernel_end) as u64,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Loaded {
     pub entry: u64,
@@ -116,6 +131,20 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Option<Loaded> {
         let end = vaddr.checked_add(memsz as u64)?;
         if vaddr < 0x1_0000 || end > crate::mem::FOUR_GIB {
             crate::kprintln!("[elf] segment outside user range: {:#x}..{:#x}", vaddr, end);
+            return None;
+        }
+        // User pages live in the same identity-mapped space as the kernel, so a
+        // segment that overlaps the kernel image would shadow kernel memory in
+        // the new address space.
+        let (kstart, kend) = kernel_range();
+        if vaddr < kend && end > kstart {
+            crate::kprintln!(
+                "[elf] segment {:#x}..{:#x} overlaps kernel image {:#x}..{:#x}",
+                vaddr,
+                end,
+                kstart,
+                kend
+            );
             return None;
         }
 

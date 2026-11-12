@@ -11,7 +11,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-pub const USER_STACK_VIRT: u64 = 0x1000_0000;
+// The kernel image now starts at 256 MiB (see kernel/linker.ld), so the user
+// stack sits just below it instead of at 256 MiB.
+pub const USER_STACK_VIRT: u64 = 0x0F00_0000;
 pub const USER_STACK_SIZE: u64 = 64 * 1024;
 pub const USER_STACK_TOP: u64 = USER_STACK_VIRT + USER_STACK_SIZE;
 

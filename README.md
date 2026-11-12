@@ -33,7 +33,9 @@ build input is the assembler source (`kernel/src/entry.S`), embedded with
   PIC remap, PIT at 1 kHz (100 Hz scheduling ticks).
 - **Memory**: bitmap physical allocator over the first 4 GiB, 4-level paging
   with 2 MiB identity pages for the kernel and 4 KiB user mappings per process,
-  64 MiB free-list heap in `.bss`.
+  64 MiB free-list heap in `.bss`. The kernel image is linked at 256 MiB (so
+  static Linux binaries linked at `0x400000` never overlap it); boot with at
+  least 512 MiB of RAM.
 - **Processes**: ELF64 loader, ring-3 tasks, per-task address spaces, file
   descriptor tables, `fork`/`exec`/`wait`/`kill`, round-robin scheduler.
 - **Desktop**: framebuffer compositor with per-window buffers, shadows,
@@ -198,7 +200,7 @@ Not yet implemented:
 | Area | Status | Notes |
 |------|--------|-------|
 | **Linux ABI** (`syscall`/`sysret`, Linux syscall table) | 🟡 **partial** | Entry point + ~30 syscalls work; static `hello_linux` runs. Missing `fstat`, `getdents64`, `execve`, `clone`/`wait4`, pipes, signals |
-| Kernel/user address-space separation | ⏳ planned | Kernel image currently occupies 1-66 MiB, the range static Linux binaries are linked at |
+| Kernel/user address-space separation | ✅ partial | Kernel + heap live at 256-320 MiB; user segments overlapping the image are rejected at load time |
 | DOOM + `doom1.wad` | ⏳ blocked on Linux ABI | The game is a static Linux binary that opens `/dev/fb0` and `mmap`s the framebuffer |
 | `/dev/fb0` + generic `mmap` | ⏳ planned | Prerequisite for DOOM and any direct-framebuffer app |
 | Monitor protocol (PING/STAT/CRASH/EXEC over serial) | ⏳ | C kernel has it; Rust has a human debug console |
